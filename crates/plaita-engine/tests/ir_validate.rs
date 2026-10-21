@@ -10,7 +10,7 @@ fn load(doc: Value) -> Result<plaita_engine::Flow, String> {
 }
 
 fn err_of(doc: Value) -> String {
-    load(doc).err().expect("expected load error")
+    load(doc).expect_err("expected load error")
 }
 
 fn flow_with_end(output: Value) -> Value {
@@ -435,7 +435,7 @@ fn property_required_list_marks_named_children() {
     // inputType 校验不在根入口做（Go 同样只在 child/code 显式校验），本条锚
     // 的是装载后 Property 形态：required list 已折成 isRequired
     let prop = flow.input_type.as_ref().unwrap();
-    assert_eq!(prop.properties.as_ref().unwrap()["k"].is_required, true);
+    assert!(prop.properties.as_ref().unwrap()["k"].is_required);
     let _ = err;
 }
 
