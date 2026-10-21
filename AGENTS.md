@@ -58,6 +58,15 @@ tools/
 6. 表达式嵌套字符串**不二次求值**、无 `switch:eagerMode` 全局、无 harness/调试 generator ——
    与 Go 版一致的简化面。
 
+## 对账发现已提报 plaita-go 的单（移植差分坐实，2026-10-21）
+
+- #40 `$F.index` 对 str 返回字节下标（Python 按字符）——本仓按字符实现；
+- #41 capitalize/title 首字符须用 titlecase 映射（'ß'→"Ss" 而非 "SS"）——本仓已按 titlecase 实现；
+- #42 getListItem 对 dict 的字符串键分支不可达（pyIndexArg 先拒 str）——本仓 dict 走 KeyError 语义、
+  同样先拒非整数下标（与 Python 一致的报错面，但 `$F.get` 是正规取键路径）；
+- #43 python sidecar 代码错误与 end FlowResultError 被判可重试（重试 6/4 次实证）——本仓两者均按
+  确定性分类（Deterministic，不烧重试预算）。
+
 ## 差分对账（改行为前必跑）
 
 ```bash

@@ -420,7 +420,22 @@ fn fn_upper(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::String(str_arg("upper", args, 0)?.to_uppercase()))
 }
 
-/// Python str.capitalize: first char upper, the REST lowercased.
+/// Unicode titlecase of a word-initial character (Python str.capitalize /
+/// str.title use the titlecase mapping, not uppercase — 'ß' → "Ss", the
+/// digraph families map to their title forms). std has no titlecase API, so
+/// the special-casing set is a table; everything else uppercases.
+fn py_titlecase_first(c: char) -> String {
+    match c {
+        '\u{00DF}' => "Ss".to_string(), // ß
+        '\u{01C4}' | '\u{01C5}' | '\u{01C6}' => '\u{01C5}'.to_string(), // Ǆ ǅ ǆ
+        '\u{01C7}' | '\u{01C8}' | '\u{01C9}' => '\u{01C8}'.to_string(), // Ǉ ǈ ǉ
+        '\u{01CA}' | '\u{01CB}' | '\u{01CC}' => '\u{01CB}'.to_string(), // Ǌ ǋ ǌ
+        '\u{01F1}' | '\u{01F2}' | '\u{01F3}' => '\u{01F2}'.to_string(), // Ǳ ǲ ǳ
+        other => other.to_uppercase().collect(),
+    }
+}
+
+/// Python str.capitalize: first char TITLECASED, the REST lowercased.
 fn fn_capitalize(args: &[Value]) -> Result<Value, EvalError> {
     arity("capitalize", args, 1)?;
     let s = str_arg("capitalize", args, 0)?;
@@ -428,7 +443,7 @@ fn fn_capitalize(args: &[Value]) -> Result<Value, EvalError> {
     let out = match chars.next() {
         None => s,
         Some(first) => {
-            let mut out: String = first.to_uppercase().collect();
+            let mut out = py_titlecase_first(first);
             out.extend(chars.flat_map(|c| c.to_lowercase()));
             out
         }
@@ -444,7 +459,7 @@ fn fn_title(args: &[Value]) -> Result<Value, EvalError> {
     let mut prev_is_letter = false;
     for c in s.chars() {
         if !prev_is_letter && c.is_alphabetic() {
-            out.extend(c.to_uppercase());
+            out.push_str(&py_titlecase_first(c));
         } else {
             out.extend(c.to_lowercase());
         }
