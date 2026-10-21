@@ -367,6 +367,103 @@ fn deterministic_errors_never_retry() {
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
+/// 子流自有 timeout 必须与父预算取 min（审计 [高]：先前「父 1s + 子 1h」
+/// 会跑满子预算才在父层炸）。
+#[test]
+fn child_timeout_escapes_are_capped_by_parent_budget() {
+    let data = r#"{
+        "flow_id": "escape",
+        "timeout": "PT1S",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "c"},
+            {"type": "child", "id": "c", "next": "e",
+             "childFlow": {
+                "flow_id": "slow_child",
+                "timeout": "PT1M",
+                "nodes": [
+                    {"type": "start", "id": "start", "next": "k"},
+                    {"type": "code", "id": "k", "language": "python", "next": "e2",
+                     "code": "import time\ndef run(input):\n    time.sleep(3)\n    return 1",
+                     "input": {}},
+                    {"type": "end", "id": "e2", "resultType": "success", "output": "$NODE.k"}
+                ]}},
+            {"type": "end", "id": "e", "resultType": "success", "output": "done"}
+        ]}"#;
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let t0 = std::time::Instant::now();
+    let err = flow.execute(&json!({}), &Host::new()).unwrap_err();
+    let elapsed = t0.elapsed();
+    assert!(err.to_string().contains("timed out"), "{err}");
+    // 父预算 1s 生效：远小于子流声明的 1 分钟与代码睡眠 3s
+    assert!(
+        elapsed < std::time::Duration::from_millis(2500),
+        "elapsed {elapsed:?}"
+    );
+}
+
+/// code 节点的超时必须能被节点 timeoutHandler 接住（审计 [中]：先前
+/// blanket deterministic 抹掉 Timeout 类，continue/continue-with 失效）。
+#[test]
+fn code_node_timeout_policy_is_reachable() {
+    let data = r#"{
+        "flow_id": "code_timeout",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "k"},
+            {"type": "code", "id": "k", "language": "python", "next": "e",
+             "timeout": "PT1S",
+             "timeoutHandler": {"strategy": "continue-with", "defaultValue": "soft-landing"},
+             "code": "import time\ndef run(input):\n    time.sleep(5)\n    return 1",
+             "input": {}},
+            {"type": "end", "id": "e", "resultType": "success", "output": "$NODE.k"}
+        ]}"#;
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let got = flow.execute(&json!({}), &Host::new()).unwrap();
+    assert_eq!(got, json!("soft-landing"));
+}
+
+/// 指数退避：1s·2^n cap 30s（审计 [高]：先前 1^attempt 恒 1s）。
+/// retryTimes=2 的瞬态错误 → 3 次尝试，墙钟 ≈ 1+2 = 3s。
+#[test]
+fn exponential_backoff_between_retries() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = attempts.clone();
+    let host = Host::new().listen(Arc::new(move |e: &plaita_engine::Event| {
+        if let plaita_engine::Event::NodeStart { node_id, .. } = e {
+            if node_id == "a" {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }));
+    // $NOPE 是缺根 KeyError → 引擎错误码 10000 → 瞬态（可重试）
+    let data = r#"{
+        "flow_id": "backoff",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "a"},
+            {"type": "assignment", "id": "a", "next": "e",
+             "output": "$F.add($NOPE, 1)",
+             "errorHandler": {"strategy": "continue-with", "defaultValue": "gave-up", "retryTimes": 2}},
+            {"type": "end", "id": "e", "resultType": "success", "output": "$NODE.a"}
+        ]}"#;
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let t0 = std::time::Instant::now();
+    let got = flow.execute(&json!({}), &host).unwrap();
+    let elapsed = t0.elapsed().as_secs_f64();
+    assert_eq!(got, json!("gave-up"));
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        3,
+        "1 + retryTimes attempts"
+    );
+    // 退避 1s + 2s = 3s（若退避失效恒 1s 则只有 ~2s）
+    assert!(
+        elapsed >= 2.8,
+        "expected exponential backoff >= 2.8s, got {elapsed}"
+    );
+    assert!(elapsed < 8.0, "elapsed {elapsed}");
+}
+
 #[test]
 fn if_node_routes_and_records_branch() {
     let data = r#"{

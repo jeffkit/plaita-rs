@@ -12,6 +12,10 @@ use crate::error::EvalError;
 use crate::pyrepr::{py_repr, py_str};
 use crate::value::{py_int, py_numeric, py_type_name};
 
+/// 填充宽度上限：Python 本身不限，但 plaita 的 $F 调用有结果规模守卫
+/// （#68，硬上限 1 亿字符）；这里用同一硬上限防 `%99999999d` 之类放大。
+const MAX_PAD_WIDTH: usize = 100_000_000;
+
 struct Spec {
     left_align: bool,
     plus_sign: bool,
@@ -102,7 +106,8 @@ pub fn py_format(fmt: &str, args: &Value) -> Result<String, EvalError> {
             i += 1;
         }
         spec.width = width.parse().ok();
-        // precision
+        // precision（std format! 的 precision 上限 65535，超出会 panic
+        // "Formatting argument out of range"——红队 P0；钳位到上限）
         if i < chars.len() && chars[i] == '.' {
             i += 1;
             let mut prec = String::new();
@@ -110,7 +115,14 @@ pub fn py_format(fmt: &str, args: &Value) -> Result<String, EvalError> {
                 prec.push(chars[i]);
                 i += 1;
             }
-            spec.precision = prec.parse().ok();
+            spec.precision = prec.parse::<usize>().ok().map(|p| p.min(65_535));
+        }
+        if let Some(w) = spec.width {
+            if w > MAX_PAD_WIDTH {
+                return Err(EvalError::value_error(format!(
+                    "format width {w} too large (limit {MAX_PAD_WIDTH})"
+                )));
+            }
         }
         // length modifiers (h/l/L) are accepted and ignored, like CPython
         while i < chars.len() && matches!(chars[i], 'h' | 'l' | 'L') {
@@ -151,30 +163,14 @@ pub fn py_format(fmt: &str, args: &Value) -> Result<String, EvalError> {
         }
         out.push_str(&rendered);
     }
-    if keyless_conversions_used(fmt) && pos_index < positional.len() {
+    // Python: 任何未被消耗的位置实参都是 TypeError——包括格式串里零个
+    // 转换符的情况（'abc' % 5 → TypeError）。映射式格式串例外。
+    if mapping.is_none() && pos_index < positional.len() {
         return Err(EvalError::type_error(
             "not all arguments converted during string formatting",
         ));
     }
     Ok(out)
-}
-
-fn keyless_conversions_used(fmt: &str) -> bool {
-    // any %-conversion that is not a mapping key and not the literal %%
-    let chars: Vec<char> = fmt.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '%' {
-            match chars.get(i + 1) {
-                Some('%') => i += 1,
-                Some('(') => {}
-                Some(_) => return true,
-                None => return true,
-            }
-        }
-        i += 1;
-    }
-    false
 }
 
 fn sign_prefix(spec: &Spec, negative: bool) -> String {
@@ -292,14 +288,10 @@ fn render_spec(spec: &Spec, arg: &Value) -> Result<String, EvalError> {
 
                 strip_frac_zeros(t, true)
             } else {
-                strip_frac_zeros(
-                    format!(
-                        "{:.*}",
-                        prec.saturating_sub(1 + exp_v.max(0) as usize),
-                        f.abs()
-                    ),
-                    false,
-                )
+                // 定位小数：有效数字 prec 个 → 小数位 = (prec-1) - exp，
+                // 负指数时加位而不是减位（0.0001234 → 9 位小数再去尾零）
+                let decimals = (prec as i32 - 1 - exp_v).max(0) as usize;
+                strip_frac_zeros(format!("{:.*}", decimals.min(65_535), f.abs()), false)
             };
             Ok(pad(spec, &sign_prefix(spec, f.is_sign_negative()), &s))
         }
@@ -401,7 +393,9 @@ mod tests {
             fmt("%(name)s is %(age)d", json!({"name": "k", "age": 3})),
             "k is 3"
         );
-        assert_eq!(fmt("100%%", json!(null)), "100%");
+        // Python: '100%%' % 5 → TypeError（零转换符时不允许多余位置实参）
+        assert!(py_format("100%%", &json!(null)).is_err());
+        assert_eq!(py_format("100%%", &json!([])).unwrap(), "100%");
         assert_eq!(fmt("%.2s", json!("hello")), "he");
         assert_eq!(fmt("%10s|", json!("ab")), "        ab|");
     }

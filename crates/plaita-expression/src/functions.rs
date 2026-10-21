@@ -146,11 +146,19 @@ fn fn_sub(args: &[Value]) -> Result<Value, EvalError> {
     Err(py_operator_type_err("sub", "-", a, b))
 }
 
-fn repeat_count(n: i64) -> usize {
+/// Python str/list 重复：负数与 0 → 空序列；超过 1 亿是 ValueError
+/// （Python #68 守卫的硬上限口径；Go 版在这里静默截断到 1 亿——给错值比报错
+/// 更糟，故改为具名错误）。
+fn repeat_count(n: i64) -> Result<usize, EvalError> {
     if n <= 0 {
-        return 0;
+        return Ok(0);
     }
-    (n as usize).min(100_000_000)
+    if n > 100_000_000 {
+        return Err(EvalError::value_error(format!(
+            "result too large: {n} repetitions (limit 100000000)"
+        )));
+    }
+    Ok(n as usize)
 }
 
 /// `a * b`: numbers multiply; str/list repeat by an int (new sequence).
@@ -167,17 +175,17 @@ fn fn_mul(args: &[Value]) -> Result<Value, EvalError> {
     }
     if let Value::String(s) = a {
         if let Some(bi) = py_int(b) {
-            return Ok(Value::String(s.repeat(repeat_count(bi))));
+            return Ok(Value::String(s.repeat(repeat_count(bi)?)));
         }
     }
     if let Value::String(s) = b {
         if let Some(ai) = py_int(a) {
-            return Ok(Value::String(s.repeat(repeat_count(ai))));
+            return Ok(Value::String(s.repeat(repeat_count(ai)?)));
         }
     }
     if let Value::Array(al) = a {
         if let Some(bi) = py_int(b) {
-            let count = repeat_count(bi);
+            let count = repeat_count(bi)?;
             let mut out = Vec::with_capacity(al.len() * count);
             for _ in 0..count {
                 out.extend(al.iter().cloned());
@@ -187,7 +195,7 @@ fn fn_mul(args: &[Value]) -> Result<Value, EvalError> {
     }
     if let Value::Array(bl) = b {
         if let Some(ai) = py_int(a) {
-            let count = repeat_count(ai);
+            let count = repeat_count(ai)?;
             let mut out = Vec::with_capacity(bl.len() * count);
             for _ in 0..count {
                 out.extend(bl.iter().cloned());
@@ -701,10 +709,23 @@ fn fn_reverse(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Array(out))
 }
 
-/// Python `a[b]`: list/string/dict indexing with negative indices; misses
-/// raise (IndexError / KeyError).
+/// Python `a[b]`: list/string/dict indexing; misses raise (IndexError /
+/// KeyError)。整数下标才走 py_index_arg——dict 的字符串键分支必须在它之前，
+/// 否则不可达（Python `{'k':5}['k']` == 5；Go 同型缺陷见 plaita-go#42）。
 fn fn_get_list_item(args: &[Value]) -> Result<Value, EvalError> {
     arity("getListItem", args, 2)?;
+    if let Value::Object(map) = &args[0] {
+        let Some(Value::String(k)) = args.get(1) else {
+            return Err(EvalError::key_error(format!(
+                "$F.getListItem: KeyError: {}",
+                py_repr(&args[1])
+            )));
+        };
+        return map
+            .get(k)
+            .cloned()
+            .ok_or_else(|| EvalError::key_error(format!("$F.getListItem: KeyError: {k:?}")));
+    }
     let idx = py_index_arg("getListItem", &args[1])?;
     match &args[0] {
         Value::Array(items) => {
@@ -727,17 +748,6 @@ fn fn_get_list_item(args: &[Value]) -> Result<Value, EvalError> {
                 ));
             }
             Ok(Value::String(chars[j as usize].to_string()))
-        }
-        Value::Object(map) => {
-            let Some(Value::String(k)) = args.get(1) else {
-                return Err(EvalError::key_error(format!(
-                    "$F.getListItem: KeyError: {}",
-                    py_repr(&args[1])
-                )));
-            };
-            map.get(k)
-                .cloned()
-                .ok_or_else(|| EvalError::key_error(format!("$F.getListItem: KeyError: {k:?}")))
         }
         other => Err(EvalError::type_error(format!(
             "$F.getListItem: '{}' object is not subscriptable",
@@ -763,22 +773,20 @@ fn fn_set_list_item(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Null)
 }
 
+/// Python `x.get(k) if isinstance(x, dict) else x`——dict 缺键是 None，
+/// 不是元素本身。
 fn sort_key_of(v: &Value, sort_key: &str) -> Value {
     if !sort_key.is_empty() {
         if let Value::Object(o) = v {
-            if let Some(x) = o.get(sort_key) {
-                return x.clone();
-            }
-        }
-        if let Value::Null = v {
-            return Value::Null;
+            return o.get(sort_key).cloned().unwrap_or(Value::Null);
         }
     }
     v.clone()
 }
 
 /// Python `sorted(a, key=lambda x: x.get(k) if dict else x, reverse=desc)`:
-/// new list, stable; incomparable pairs keep their relative order.
+/// new list, stable; a failed comparison is a TypeError（先前吞错静默返回
+/// 未排序列表——给错值比报错糟）。
 fn fn_sort(args: &[Value]) -> Result<Value, EvalError> {
     arity_min("sort", args, 1)?;
     let sort_key = match args.get(1) {
@@ -793,12 +801,12 @@ fn fn_sort(args: &[Value]) -> Result<Value, EvalError> {
         let mut j = i;
         while j > 0 {
             let (a, b) = (key(&out[j - 1]), key(&out[j]));
-            let ord = crate::value::compare("$F.sort", &a, &b).ok();
+            let ord = crate::value::compare("$F.sort", &a, &b)?;
             // ascending: swap when prev > cur; descending: swap when prev < cur
             let out_of_order = match ord {
-                Some(std::cmp::Ordering::Greater) => !desc,
-                Some(std::cmp::Ordering::Less) => desc,
-                _ => false,
+                std::cmp::Ordering::Greater => !desc,
+                std::cmp::Ordering::Less => desc,
+                std::cmp::Ordering::Equal => false,
             };
             if !out_of_order {
                 break;
@@ -1551,6 +1559,30 @@ mod tests {
         assert_eq!(&s[4..5], "-");
         let v = call("$F.today('%Y/%m/%d')", json!({}));
         assert!(v.as_str().unwrap().contains('/'));
+    }
+
+    #[test]
+    fn audit_fix_regressions() {
+        // getListItem 对 dict 的字符串键可达（Python a['k'] 语义；Go 同型缺陷 plaita-go#42）
+        assert_eq!(
+            call("$F.getListItem($INPUT.a, 'k')", json!({"a": {"k": 5}})),
+            json!(5)
+        );
+        assert!(eval_str(
+            "$F.getListItem($INPUT.a, 'nope')",
+            &roots(json!({"a": {"k": 5}}))
+        )
+        .is_err());
+        // sort：比较失败是 TypeError（先前静默返回未排序列表）
+        assert!(eval_str("$F.sort($INPUT.a)", &roots(json!({"a": [3, "x", 1]}))).is_err());
+        // sort dict 缺键回退 None → None 与值混排同样 TypeError（Python x.get(k)）
+        assert!(eval_str(
+            "$F.sort($INPUT.a, 'k')",
+            &roots(json!({"a": [{"k": 2}, {}]}))
+        )
+        .is_err());
+        // mul 超 1 亿：具名错误（先前静默截断到 1 亿）
+        assert!(eval_str("$F.mul('a', 150000000)", &roots(json!({}))).is_err());
     }
 
     #[test]

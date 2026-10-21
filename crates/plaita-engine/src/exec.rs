@@ -39,12 +39,14 @@ pub enum Event {
 
 pub type EventSink = Arc<dyn Fn(&Event) + Send + Sync>;
 
-/// Host-side wiring for one execution tree: the distributed execution id and
-/// the event listeners. Shared (by `Arc`) across flow/branch threads.
+/// Host-side wiring for one execution tree: the distributed execution id,
+/// the event listeners and the fire-and-forget branch join handles. Shared
+/// (by `Arc`) across flow/branch threads.
 #[derive(Clone, Default)]
 pub struct Host {
     pub execution_id: Option<String>,
     events: Arc<Vec<EventSink>>,
+    background: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
 
 impl Host {
@@ -56,6 +58,7 @@ impl Host {
         Host {
             execution_id: Some(execution_id.into()),
             events: Arc::new(Vec::new()),
+            background: Default::default(),
         }
     }
 
@@ -70,6 +73,27 @@ impl Host {
     pub(crate) fn emit(&self, event: Event) {
         for sink in self.events.iter() {
             sink(&event);
+        }
+    }
+
+    /// Registers a fire-and-forget parallel branch thread so the host can
+    /// drain before exiting (Go's worker is long-lived so goroutine death at
+    /// process exit never mattered; a short-lived CLI host kills in-flight
+    /// background branches unless it drains).
+    pub(crate) fn track_background(&self, handle: std::thread::JoinHandle<()>) {
+        self.background
+            .lock()
+            .expect("background lock")
+            .push(handle);
+    }
+
+    /// Waits for all fire-and-forget branches to settle. Call before process
+    /// exit when background branch side effects matter.
+    pub fn join_background(&self) {
+        let handles: Vec<_> =
+            std::mem::take(&mut *self.background.lock().expect("background lock"));
+        for h in handles {
+            let _ = h.join();
         }
     }
 }
@@ -88,6 +112,10 @@ impl Flow {
     /// deadline) fails immediately instead of letting budget-ignoring node
     /// bodies run to completion (plaita#138).
     pub fn execute(&self, input: &Value, host: &Host) -> Result<Value, FlowError> {
+        // 有意分歧（与 Go 对照）：Go 在 Execute 入口 prepare 一次运行时上下文、
+        // 流级重试轮复用（上一轮的 $NODE/$ERROR 残留进重试轮）；本引擎每轮
+        // 重建干净上下文——重试轮不应看到失败轮的中间态。依赖该残留的 flow
+        // 属于反模式（见 exec 模块注释）。
         let flow_deadline = self.timeout.map(|t| Instant::now() + t);
         let mut attempt: u64 = 0;
         loop {
@@ -338,8 +366,9 @@ impl Flow {
                 }
                 Err(_) => {
                     // plaita's exponential backoff: 1s × 2^n capped at 30s
+                    //（底数是 2——先前写成 1^attempt 恒等于 1s，退避失效）
                     let delay = NODE_BACKOFF_BASE
-                        .saturating_mul(1u32.saturating_pow(attempt as u32))
+                        .saturating_mul(2u32.saturating_pow((attempt as u32).min(31)))
                         .min(NODE_BACKOFF_CAP);
                     if sleep_respecting(node_deadline, delay).is_err() {
                         final_err = Some(NodeError::timeout("context deadline exceeded"));
@@ -351,7 +380,13 @@ impl Flow {
         }
 
         if let Some(ne) = final_err {
-            let flow_err = FlowError::node(&node.id, &node.node_type, ne.clone());
+            let mut flow_err = FlowError::node(&node.id, &node.node_type, ne.clone());
+            // 超时 abort 的包裹来源是 timeoutHandler（Go 先以它包裹，
+            // errorHandler 的包裹遇已包裹错误会跳过）；两处都没配则维持裸错
+            if ne.class == ErrorClass::Timeout && !flow_budget_binding(rc, node_deadline) {
+                flow_err =
+                    flow_err.wrap_handler(node.timeout_policy.code, &node.timeout_policy.message);
+            }
             // 继续执行策略：把错误信息存到 $ERROR 供下游引用
             if matches!(
                 node.error_policy.strategy,

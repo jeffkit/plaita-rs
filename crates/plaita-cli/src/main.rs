@@ -119,7 +119,10 @@ fn run(cli: Cli) -> Result<(), String> {
                     println_event(&flow_label, event);
                 }));
             }
-            match loaded.execute(&args, &host) {
+            let outcome = loaded.execute(&args, &host);
+            // 后台分支留有副作用（写文件/通知）时不在途丢弃
+            host.join_background();
+            match outcome {
                 Ok(result) => {
                     println!(
                         "{}",

@@ -211,7 +211,9 @@ fn eval_var(root: &str, path: &[Segment], roots: &dyn Roots) -> Result<Value, Ev
     }
 
     if let Some(v) = scalar_root(&root) {
-        return Ok(v);
+        // 标量根是运行时注入的普通值（Python 的 {"$NULL": None}），后继段按
+        // 常规语义求值：$NULL[0] → TypeError、$EMPTYSTRING[0] → IndexError
+        return eval_var_path(&root, &v, path);
     }
 
     let mut result: Option<Result<Value, EvalError>> = None;
@@ -265,8 +267,10 @@ fn eval_var_path(root: &str, root_value: &Value, path: &[Segment]) -> Result<Val
     for seg in &path {
         match cur {
             Value::Null => match seg {
-                // field access through None keeps yielding None
-                Segment::Field(_) => {}
+                // field access through None keeps yielding None — except the
+                // `_`-prefixed attribute gate (plaita#55: every non-mapping
+                // base refuses private/dunder attribute reads)
+                Segment::Field(name) => reject_private_attr(name)?,
                 Segment::Index(_) => {
                     return Err(EvalError::type_error(
                         "cannot index None (plaita: 'NoneType' object is not subscriptable)",
@@ -323,6 +327,19 @@ fn eval_var_path(root: &str, root_value: &Value, path: &[Segment]) -> Result<Val
         }
     }
     Ok(cur)
+}
+
+/// plaita#55 attribute-traversal gate on non-mapping bases: any `_`-prefixed
+/// attribute read (`$NODE.n.__class__`, `$INPUT.list.__len__`, `$INPUT.s._x`)
+/// is a ValueError instead of traversing into Python internals. Mapping
+/// bases only gate `__` (single-underscore keys stay readable).
+fn reject_private_attr(name: &str) -> Result<(), EvalError> {
+    if name.starts_with('_') {
+        return Err(EvalError::value_error(format!(
+            "attribute access through '_'-prefixed segment {name:?} is not allowed on a non-mapping value"
+        )));
+    }
+    Ok(())
 }
 
 /// $F functions Python's expression.py registers with has_side_effects=True.

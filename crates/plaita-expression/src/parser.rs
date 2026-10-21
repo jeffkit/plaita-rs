@@ -54,10 +54,20 @@ pub enum TemplatePart {
     Interp(Expr),
 }
 
+/// 表达式 AST 的最大嵌套深度（函数调用/参数链）。Python 侧是 RecursionError
+/// （干净报错），Rust 递归下降无此护栏会栈溢出 abort（红队 P0 实测 ~4500 层
+/// 主线程即炸），故显式设限。plaita 生产 flow 的实际嵌套是个位数。
+pub const MAX_PARSE_DEPTH: usize = 256;
+
 /// Parses a whole `$`-prefixed expression (`function_call | variable`),
 /// requiring the entire input to be consumed.
 pub fn parse(src: &str) -> Result<Expr, ParseError> {
-    let mut p = Parser::new(src);
+    let chars: Vec<char> = src.chars().collect();
+    let mut p = Parser {
+        chars: &chars,
+        pos: 0,
+        depth: 0,
+    };
     p.skip_ws();
     let expr = p.parse_prefix_expr()?;
     p.skip_ws();
@@ -106,11 +116,14 @@ pub fn parse_template(src: &str) -> Option<Vec<TemplatePart>> {
 }
 
 /// Attempts to parse `{%` ws expr ws `%}` at `start`; returns the expression
-/// and the index just past `%}`.
+/// and the index just past `%}`. Borrows the char slice — the old per-attempt
+/// `to_vec()` clone made every `{%` attempt O(n)（模板整体 O(n²)，红队 P1 实测
+/// 10000 段模板 51s）。
 fn try_interpolation(chars: &[char], start: usize) -> Option<(Expr, usize)> {
     let mut p = Parser {
-        chars: chars.to_vec(),
+        chars,
         pos: start + 2,
+        depth: 0,
     };
     p.skip_ws();
     let expr = p.parse_expr().ok()?;
@@ -121,9 +134,11 @@ fn try_interpolation(chars: &[char], start: usize) -> Option<(Expr, usize)> {
     None
 }
 
-struct Parser {
-    chars: Vec<char>,
+struct Parser<'a> {
+    chars: &'a [char],
     pos: usize,
+    /// 递归深度（function_call → parse_expr → function_call …）
+    depth: usize,
 }
 
 const WS: &[char] = &[' ', '\t', '\n', '\r'];
@@ -146,14 +161,7 @@ fn is_keyword_tail_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '$'
 }
 
-impl Parser {
-    fn new(src: &str) -> Parser {
-        Parser {
-            chars: src.chars().collect(),
-            pos: 0,
-        }
-    }
-
+impl<'a> Parser<'a> {
     fn at_end(&self) -> bool {
         self.pos >= self.chars.len()
     }
@@ -203,6 +211,18 @@ impl Parser {
 
     /// `constant | function_call | variable`
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(self.error(&format!(
+                "expression nesting too deep (limit {MAX_PARSE_DEPTH})"
+            )));
+        }
+        let out = self.parse_expr_inner();
+        self.depth -= 1;
+        out
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<Expr, ParseError> {
         if let Some(c) = self.try_parse_constant()? {
             return Ok(c);
         }
@@ -328,12 +348,18 @@ impl Parser {
             if c == '\\' {
                 match self.peek_at(1) {
                     None => return Err(self.error("unterminated string literal")),
+                    // 反斜杠 + 真实换行：pyparsing 的 QuotedString 不跨行，
+                    // 这类串是解析失败（模板保持字面），不是合法转义
+                    Some('\n') | Some('\r') => {
+                        return Err(self.error("string literal must not span lines"))
+                    }
                     Some(e) => {
                         out.push(match e {
                             'n' => '\n',
                             't' => '\t',
                             'r' => '\r',
                             'f' => '\u{0c}',
+                            '0' => '\0',
                             other => other,
                         });
                         self.pos += 2;

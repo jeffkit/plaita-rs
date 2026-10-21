@@ -65,8 +65,8 @@ fn directive(t: &chrono::DateTime<chrono::Local>, d: char) -> String {
         'W' => format!("{:02}", (day_of_year(t) + 6 - weekday_mon0(t)) / 7),
         'G' => format!("{:04}", t.iso_week().year()),
         'V' => format!("{:02}", iso_week(t)),
-        'z' => t.format("%z").to_string(),
-        'Z' => t.format("%Z").to_string(),
+        // plaita _fn_now/_fn_today 用 naive datetime：%z/%Z 渲染为空串
+        'z' | 'Z' => String::new(),
         'c' => t.format("%a %b %e %H:%M:%S %Y").to_string(),
         'x' => t.format("%m/%d/%y").to_string(),
         'X' => t.format("%H:%M:%S").to_string(),

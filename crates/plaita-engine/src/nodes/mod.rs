@@ -66,15 +66,24 @@ pub fn execute_node_body(
             child_flow,
             rc,
             host,
+            deadline,
         ),
         NodeKind::Parallel {
             branches,
             is_conditional,
             join_branches,
             ..
-        } => execute_parallel(node, branches, *is_conditional, join_branches, rc, host),
+        } => execute_parallel(
+            node,
+            branches,
+            *is_conditional,
+            join_branches,
+            rc,
+            host,
+            deadline,
+        ),
         NodeKind::Child { child_flow, input } => {
-            execute_child(node, child_flow, input.as_ref(), rc, host)
+            execute_child(node, child_flow, input.as_ref(), rc, host, deadline)
         }
         NodeKind::Code {
             language,
@@ -264,9 +273,8 @@ fn execute_switch(
             }
             break;
         }
-        if let Some(info) = info {
-            match_infos.push(info);
-        }
+        // Go 对表达式条件不命中/组短路（info=nil）仍 append 占位——保持形状一致
+        match_infos.push(info.unwrap_or(Value::Null));
     }
 
     if selected.is_none() {
@@ -371,6 +379,7 @@ fn execute_loop(
     child_flow: &Flow,
     rc: &SharedCtx,
     host: &Host,
+    deadline: Option<Instant>,
 ) -> Result<StepOutcome, NodeError> {
     let elements: Vec<Value> = match collection {
         Collection::Array(a) => a.clone(),
@@ -402,7 +411,7 @@ fn execute_loop(
 
         // Run the child flow with the current item and index
         let input = json!({"item": item, "index": index});
-        let child_rc = RuntimeCtx::child(rc, input.clone(), &child_flow.id, child_flow);
+        let child_rc = RuntimeCtx::child(rc, input.clone(), &child_flow.id, child_flow, deadline);
         let child_result = child_flow
             .execute_on(&child_rc, host, &input)
             .map_err(|e| NodeError::transient(e.to_string()))?;
@@ -441,6 +450,7 @@ fn execute_child(
     input: Option<&Value>,
     rc: &SharedCtx,
     host: &Host,
+    deadline: Option<Instant>,
 ) -> Result<StepOutcome, NodeError> {
     let input = match input {
         Some(v) => eval_value(node, "child input", v, rc).map_err(|e| {
@@ -459,7 +469,7 @@ fn execute_child(
             ))
         })?;
     }
-    let child_rc = RuntimeCtx::child(rc, input.clone(), &child_flow.id, child_flow);
+    let child_rc = RuntimeCtx::child(rc, input.clone(), &child_flow.id, child_flow, deadline);
     let result = child_flow
         .execute_on(&child_rc, host, &input)
         .map_err(|e| {
@@ -487,6 +497,7 @@ fn execute_parallel(
     join_branches: &[String],
     rc: &SharedCtx,
     host: &Host,
+    deadline: Option<Instant>,
 ) -> Result<StepOutcome, NodeError> {
     let matched: Vec<&crate::model::ParallelBranchDef> = if !is_conditional {
         branches.iter().collect()
@@ -517,16 +528,19 @@ fn execute_parallel(
     for b in &background {
         let base_rc = rc.snapshot_arc();
         let b = (*b).clone();
-        let host = host.clone();
+        let host_thread = host.clone();
         let node_id = node.id.clone();
-        std::thread::spawn(move || {
-            if let Err(err) = run_branch_flow(&b, &base_rc, &host) {
+        let handle = std::thread::spawn(move || {
+            if let Err(err) = run_branch_flow(&b, &base_rc, &host_thread, deadline) {
                 eprintln!(
                     "parallel node {node_id:?} background branch {:?} failed: {err}",
                     b.branch.name
                 );
             }
         });
+        // 后台分支留 join 面：CLI/宿主可在退出前 drain（Go worker 长存无此
+        // 需求；短命宿主不 drain 会在进程退出时杀掉在途分支）
+        host.track_background(handle);
     }
 
     // Join branches run concurrently; a branch failure does not fail the
@@ -541,7 +555,7 @@ fn execute_parallel(
                     let b = (*b).clone();
                     let base_rc = rc.snapshot_arc();
                     let host = host.clone();
-                    scope.spawn(move || run_branch_flow(&b, &base_rc, &host))
+                    scope.spawn(move || run_branch_flow(&b, &base_rc, &host, deadline))
                 })
                 .collect();
             handles
@@ -590,6 +604,7 @@ fn run_branch_flow(
     b: &crate::model::ParallelBranchDef,
     base_rc: &SharedCtx,
     host: &Host,
+    deadline: Option<Instant>,
 ) -> Result<Value, NodeError> {
     let Some(flow) = &b.flow else {
         return Err(NodeError::transient("parallel branch has no flow"));
@@ -607,7 +622,7 @@ fn run_branch_flow(
             .cloned()
             .unwrap_or(Value::Null),
     };
-    let branch_rc = RuntimeCtx::child(base_rc, input.clone(), &flow.id, flow);
+    let branch_rc = RuntimeCtx::child(base_rc, input.clone(), &flow.id, flow, deadline);
     flow.execute_on(&branch_rc, host, &input)
         .map_err(|e| NodeError::transient(e.to_string()))
 }

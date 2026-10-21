@@ -83,13 +83,22 @@ impl RuntimeCtx {
     /// Builds the child-execution context for a sub-flow (child / loop body
     /// / parallel branch): parent linkage, the flow's own globals, its
     /// exposeEnv and its own timeout budget.
+    ///
+    /// 预算合成（Go context.WithTimeout 语义）：子流自有 timeout 与外层
+    /// deadline（父流/父节点预算经 `outer_deadline` 传入）取 min——否则
+    /// 「父 1s + 子流声明 1h」会跑满 1h 才在父层炸（审计 [高] 实测 3s 逃逸）。
     pub fn child(
         parent: &SharedCtx,
         input: Value,
         flow_id: &str,
         flow: &crate::model::Flow,
+        outer_deadline: Option<std::time::Instant>,
     ) -> SharedCtx {
-        let deadline = flow.timeout.map(|t| std::time::Instant::now() + t);
+        let own = flow.timeout.map(|t| std::time::Instant::now() + t);
+        let deadline = match (own, outer_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         RuntimeCtx::new_execution(
             Some(parent),
             input,

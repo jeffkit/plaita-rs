@@ -96,8 +96,6 @@ pub enum FlowError {
         node_type: String,
         error: NodeError,
     },
-    /// `end` node with resultType "error" (plaita FlowResultError).
-    FlowResult { code: String, message: String },
     /// An abort handler with a configured code/message wrapped the cause.
     Handler {
         code: i64,
@@ -171,9 +169,6 @@ impl fmt::Display for FlowError {
                 node_type,
                 error,
             } => write!(f, "node {node_id:?} ({node_type}) failed: {error}"),
-            FlowError::FlowResult { code, message } => {
-                write!(f, "FlowResultError: code={code}, message={message}")
-            }
             FlowError::Handler {
                 code,
                 message,

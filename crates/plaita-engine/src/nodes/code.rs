@@ -186,10 +186,17 @@ pub(crate) fn execute_code(
                 None => Value::Null,
             };
             let result = run_python_subprocess(code, arguments, deadline).map_err(|e| {
-                NodeError::deterministic(format!(
-                    "code node: failed to interpret code: {}",
-                    e.message
-                ))
+                // 代码错误按确定性分类（plaita ValueError 语义，不烧重试预算）
+                // ——但 Timeout 类必须保留：引擎的节点/流程 timeoutHandler
+                // 以 class==Timeout 为闸，抹掉它会让超时策略对 code 节点失哑
+                if e.class == crate::error::ErrorClass::Timeout {
+                    e
+                } else {
+                    NodeError::deterministic(format!(
+                        "code node: failed to interpret code: {}",
+                        e.message
+                    ))
+                }
             })?;
             crate::nodes::validate_output_pub(node, "code output", &result)?;
             Ok(StepOutcome {
@@ -239,11 +246,15 @@ fn run_python_subprocess(
     let runner = build_python_runner_script(code, mem_mb * 1024 * 1024);
 
     use std::io::Write;
+    use std::os::unix::process::CommandExt;
     let mut child = Command::new("python3")
         .arg("-c")
         .arg(&runner)
         .env_clear()
         .envs(build_subprocess_env(&[]))
+        // 独立进程组（plaita start_new_session=True 同款）：超时/取消可以
+        // 杀掉整个树，用户代码 spawn 的孙子进程不残留
+        .process_group(0)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
