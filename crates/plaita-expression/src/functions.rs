@@ -426,7 +426,7 @@ fn fn_upper(args: &[Value]) -> Result<Value, EvalError> {
 /// the special-casing set is a table; everything else uppercases.
 fn py_titlecase_first(c: char) -> String {
     match c {
-        '\u{00DF}' => "Ss".to_string(), // ß
+        '\u{00DF}' => "Ss".to_string(),                                 // ß
         '\u{01C4}' | '\u{01C5}' | '\u{01C6}' => '\u{01C5}'.to_string(), // Ǆ ǅ ǆ
         '\u{01C7}' | '\u{01C8}' | '\u{01C9}' => '\u{01C8}'.to_string(), // Ǉ ǈ ǉ
         '\u{01CA}' | '\u{01CB}' | '\u{01CC}' => '\u{01CB}'.to_string(), // Ǌ ǋ ǌ
