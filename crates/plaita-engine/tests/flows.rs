@@ -226,7 +226,7 @@ fn plaita_condition_operators() {
 /// do not hand-edit) so the suite has no sibling-checkout dependency.
 #[test]
 fn go_examples() {
-    for name in ["add", "hello_world"] {
+    for name in ["go-example-add", "go-example-hello_world"] {
         let data = std::fs::read(format!(
             "{}/testdata/{name}.json",
             env!("CARGO_MANIFEST_DIR")

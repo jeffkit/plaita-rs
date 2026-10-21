@@ -1,20 +1,8 @@
 {
-  "id": "hello-world-flow",
-  "name": "Hello World Flow",
-  "outputType": {
-    "dataType": "string"
-  },
+  "flow_id": "hello_world_go",
+  "inputType": { "dataType": "object" },
   "nodes": [
-    {
-      "id": "start",
-      "type": "start",
-      "next": "end"
-    },
-    {
-      "id": "end",
-      "type": "end",
-      "resultType": "success",
-      "output": "Hello, world!"
-    }
+    { "type": "start", "id": "start", "next": "end" },
+    { "type": "end", "id": "end", "resultType": "success", "output": "Hello, world!" }
   ]
 }

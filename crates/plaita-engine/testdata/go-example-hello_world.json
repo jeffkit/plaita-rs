@@ -1,0 +1,20 @@
+{
+  "id": "hello-world-flow",
+  "name": "Hello World Flow",
+  "outputType": {
+    "dataType": "string"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "next": "end"
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "resultType": "success",
+      "output": "Hello, world!"
+    }
+  ]
+}
