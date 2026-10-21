@@ -54,7 +54,11 @@ pub fn py_repr(v: &Value) -> String {
 /// when the text contains `'` but no `"`, escape backslashes, the chosen
 /// quote and control characters.
 pub fn py_str_quote(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::with_capacity(s.len() + 2);
     out.push(quote);
     for ch in s.chars() {
@@ -85,7 +89,11 @@ pub fn py_float_repr(f: f64) -> String {
         return "nan".to_string();
     }
     if f.is_infinite() {
-        return if f > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+        return if f > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
     }
     let neg = if f.is_sign_negative() { "-" } else { "" };
     let a = f.abs();
@@ -95,7 +103,9 @@ pub fn py_float_repr(f: f64) -> String {
     // Rust's LowerExp uses the shortest round-trip digit string, the same
     // digit selection as CPython's repr.
     let sci = format!("{a:e}"); // "d[.ddd]e[-]x"
-    let (mant, exp) = sci.split_once('e').expect("LowerExp always has an exponent");
+    let (mant, exp) = sci
+        .split_once('e')
+        .expect("LowerExp always has an exponent");
     let exp: i32 = exp.parse().expect("exponent is an integer");
     let digits: String = mant.chars().filter(|c| *c != '.').collect();
     let decpt = exp + 1; // value = 0.<digits> * 10^decpt

@@ -48,9 +48,7 @@ pub fn py_format(fmt: &str, args: &Value) -> Result<String, EvalError> {
         }
         i += 1;
         if i >= chars.len() {
-            return Err(EvalError::value_error(
-                "incomplete format at end of string",
-            ));
+            return Err(EvalError::value_error("incomplete format at end of string"));
         }
         // mapping key
         let mut key: Option<String> = None;
@@ -154,7 +152,9 @@ pub fn py_format(fmt: &str, args: &Value) -> Result<String, EvalError> {
         out.push_str(&rendered);
     }
     if keyless_conversions_used(fmt) && pos_index < positional.len() {
-        return Err(EvalError::type_error("not all arguments converted during string formatting"));
+        return Err(EvalError::type_error(
+            "not all arguments converted during string formatting",
+        ));
     }
     Ok(out)
 }
@@ -232,7 +232,10 @@ fn render_spec(spec: &Spec, arg: &Value) -> Result<String, EvalError> {
             Value::String(s) if s.chars().count() == 1 => Ok(pad_str(spec, s)),
             v => {
                 let code = py_int(v).ok_or_else(|| {
-                    EvalError::type_error(format!("%c requires int or char, got {}", py_type_name(v)))
+                    EvalError::type_error(format!(
+                        "%c requires int or char, got {}",
+                        py_type_name(v)
+                    ))
                 })?;
                 let ch = char::from_u32(code as u32)
                     .ok_or_else(|| EvalError::value_error("%c arg not in range(0x110000)"))?;
@@ -244,7 +247,9 @@ fn render_spec(spec: &Spec, arg: &Value) -> Result<String, EvalError> {
                 Value::Number(n) if n.is_f64() => {
                     let f = n.as_f64().unwrap();
                     if !f.is_finite() {
-                        return Err(EvalError::type_error("integer argument expected, got float"));
+                        return Err(EvalError::type_error(
+                            "integer argument expected, got float",
+                        ));
                     }
                     f as i64
                 }
@@ -259,12 +264,9 @@ fn render_spec(spec: &Spec, arg: &Value) -> Result<String, EvalError> {
         }
         'f' | 'F' => {
             let f = py_numeric(arg).ok_or_else(|| {
-                EvalError::type_error(format!(
-                    "must be real number, not {}",
-                    py_type_name(arg)
-                ))
+                EvalError::type_error(format!("must be real number, not {}", py_type_name(arg)))
             })?;
-            let prec = spec.precision.unwrap_or(6) as usize;
+            let prec = spec.precision.unwrap_or(6);
             let s = format!("{:.*}", prec, f.abs());
             Ok(pad(spec, &sign_prefix(spec, f.is_sign_negative()), &s))
         }
@@ -272,7 +274,7 @@ fn render_spec(spec: &Spec, arg: &Value) -> Result<String, EvalError> {
             let f = py_numeric(arg).ok_or_else(|| {
                 EvalError::type_error(format!("must be real number, not {}", py_type_name(arg)))
             })?;
-            let prec = spec.precision.unwrap_or(6) as usize;
+            let prec = spec.precision.unwrap_or(6);
             let s = format!("{:.*e}", prec, f.abs());
             let s = pythonize_exp(&s, spec.conv == 'E');
             Ok(pad(spec, &sign_prefix(spec, f.is_sign_negative()), &s))
@@ -281,22 +283,33 @@ fn render_spec(spec: &Spec, arg: &Value) -> Result<String, EvalError> {
             let f = py_numeric(arg).ok_or_else(|| {
                 EvalError::type_error(format!("must be real number, not {}", py_type_name(arg)))
             })?;
-            let prec = spec.precision.unwrap_or(6).max(1) as usize;
+            let prec = spec.precision.unwrap_or(6).max(1);
             let s = format!("{:.*e}", prec - 1, f.abs());
             let (_mant, exp) = s.split_once('e').unwrap_or((s.as_str(), "0"));
             let exp_v: i32 = exp.parse().unwrap_or(0);
             let s = if exp_v < -4 || exp_v >= prec as i32 {
                 let t = pythonize_exp(&s, spec.conv == 'G');
-                let t = strip_frac_zeros(t, true);
-                t
+                
+                strip_frac_zeros(t, true)
             } else {
-                strip_frac_zeros(format!("{:.*}", prec.saturating_sub(1 + exp_v.max(0) as usize).max(0), f.abs()), false)
+                strip_frac_zeros(
+                    format!(
+                        "{:.*}",
+                        prec.saturating_sub(1 + exp_v.max(0) as usize),
+                        f.abs()
+                    ),
+                    false,
+                )
             };
             Ok(pad(spec, &sign_prefix(spec, f.is_sign_negative()), &s))
         }
         'x' | 'X' | 'o' | 'b' => {
             let i = py_int(arg).ok_or_else(|| {
-                EvalError::type_error(format!("%{}/o requires an integer, got {}", spec.conv, py_type_name(arg)))
+                EvalError::type_error(format!(
+                    "%{}/o requires an integer, got {}",
+                    spec.conv,
+                    py_type_name(arg)
+                ))
             })?;
             let digits = match spec.conv {
                 'x' => format!("{:x}", i.unsigned_abs()),
@@ -329,7 +342,11 @@ fn pythonize_exp(s: &str, upper: bool) -> String {
         None => return s.to_string(),
     };
     let ev: i32 = exp.parse().unwrap_or(0);
-    let m = if upper { mant.to_uppercase() } else { mant.to_string() };
+    let m = if upper {
+        mant.to_uppercase()
+    } else {
+        mant.to_string()
+    };
     format!("{m}e{}{:02}", if ev < 0 { '-' } else { '+' }, ev.abs())
 }
 
@@ -376,11 +393,14 @@ mod tests {
         assert_eq!(fmt("%x", json!(255)), "ff");
         assert_eq!(fmt("%#x", json!(255)), "0xff");
         assert_eq!(fmt("%o", json!(8)), "10");
-        assert_eq!(fmt("%.3f", json!(3.14159)), "3.142");
+        assert_eq!(fmt("%.3f", json!(1.23456)), "1.235");
         assert_eq!(fmt("%f", json!(3)), "3.000000");
         assert_eq!(fmt("%.2e", json!(12345.6789)), "1.23e+04");
         assert_eq!(fmt("%s=%d", json!(["x", 5])), "x=5");
-        assert_eq!(fmt("%(name)s is %(age)d", json!({"name": "k", "age": 3})), "k is 3");
+        assert_eq!(
+            fmt("%(name)s is %(age)d", json!({"name": "k", "age": 3})),
+            "k is 3"
+        );
         assert_eq!(fmt("100%%", json!(null)), "100%");
         assert_eq!(fmt("%.2s", json!("hello")), "he");
         assert_eq!(fmt("%10s|", json!("ab")), "        ab|");

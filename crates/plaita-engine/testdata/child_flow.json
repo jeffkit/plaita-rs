@@ -1,0 +1,55 @@
+{
+ "runtime": "python",
+ "flow_id": "greet_go",
+ "inputType": {
+  "dataType": "object"
+ },
+ "nodes": [
+  {
+   "type": "start",
+   "id": "start",
+   "next": "c"
+  },
+  {
+   "type": "child",
+   "id": "c",
+   "input": {
+    "name": "$INPUT.name"
+   },
+   "childFlow": {
+    "runtime": "python",
+    "flow_id": "greet_cf",
+    "nodes": [
+     {
+      "type": "start",
+      "id": "start",
+      "next": "ret_concat_hello_name"
+     },
+     {
+      "type": "end",
+      "id": "ret_concat_hello_name",
+      "output": "$F.concat(\"hello \", $INPUT.name)",
+      "resultType": "success",
+      "name": "return F.concat('hello ', I…",
+      "desc": "return F.concat('hello ', INPUT.name)（第 6 行）",
+      "source_line": 6
+     }
+    ],
+    "inputType": {
+     "dataType": "object"
+    }
+   },
+   "next": "ret_c",
+   "source_line": 10
+  },
+  {
+   "type": "end",
+   "id": "ret_c",
+   "output": "$NODE.c",
+   "resultType": "success",
+   "name": "return c",
+   "desc": "return c（第 11 行）",
+   "source_line": 11
+  }
+ ]
+}

@@ -524,12 +524,14 @@ dependencies = [
 name = "plaita-engine"
 version = "0.1.0"
 dependencies = [
+ "form_urlencoded",
  "indexmap",
  "plaita-expression",
  "serde",
  "serde_json",
  "thiserror",
  "ureq",
+ "url",
  "uuid",
 ]
 

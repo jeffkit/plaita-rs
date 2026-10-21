@@ -107,8 +107,7 @@ pub fn equal(l: &Value, r: &Value) -> bool {
         }
         (Value::Object(a), Value::Object(b)) => {
             a.len() == b.len()
-                && a
-                    .iter()
+                && a.iter()
                     .all(|(k, v)| b.get(k).map(|w| equal(v, w)).unwrap_or(false))
         }
         _ => false,
@@ -196,10 +195,25 @@ mod tests {
 
     #[test]
     fn truthiness() {
-        for falsy in [json!(null), json!(false), json!(0), json!(0.0), json!(""), json!([]), json!({})] {
+        for falsy in [
+            json!(null),
+            json!(false),
+            json!(0),
+            json!(0.0),
+            json!(""),
+            json!([]),
+            json!({}),
+        ] {
             assert!(!is_truthy(&falsy), "{falsy}");
         }
-        for truthy in [json!(true), json!(1), json!(-0.5), json!("x"), json!([0]), json!({"a": null})] {
+        for truthy in [
+            json!(true),
+            json!(1),
+            json!(-0.5),
+            json!("x"),
+            json!([0]),
+            json!({"a": null}),
+        ] {
             assert!(is_truthy(&truthy), "{truthy}");
         }
     }

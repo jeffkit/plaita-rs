@@ -58,7 +58,10 @@ fn directive(t: &chrono::DateTime<chrono::Local>, d: char) -> String {
         'j' => format!("{:03}", day_of_year(t)),
         'w' => t.weekday().num_days_from_sunday().to_string(),
         'u' => (weekday_mon0(t) + 1).to_string(),
-        'U' => format!("{:02}", (day_of_year(t) + 6 - t.weekday().num_days_from_sunday()) / 7),
+        'U' => format!(
+            "{:02}",
+            (day_of_year(t) + 6 - t.weekday().num_days_from_sunday()) / 7
+        ),
         'W' => format!("{:02}", (day_of_year(t) + 6 - weekday_mon0(t)) / 7),
         'G' => format!("{:04}", t.iso_week().year()),
         'V' => format!("{:02}", iso_week(t)),

@@ -20,4 +20,6 @@ serde_json = { workspace = true }
 indexmap = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+url = "2"
+form_urlencoded = "1"
 ureq = { workspace = true, optional = true }

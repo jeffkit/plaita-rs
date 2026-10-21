@@ -1,0 +1,10 @@
+{
+  "flow_id": "if_flow",
+  "nodes": [
+    {"type": "start", "id": "s", "next": "q"},
+    {"type": "if", "id": "q", "next": "yes", "else_next": "no",
+     "condition": {"field": "$INPUT.v", "operator": "gt", "value": 10}},
+    {"type": "end", "id": "yes", "resultType": "success", "output": "$BRANCH"},
+    {"type": "end", "id": "no", "resultType": "success", "output": "$BRANCH"}
+  ]
+}

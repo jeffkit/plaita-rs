@@ -1,0 +1,12 @@
+{
+  "flow_id": "err_policy",
+  "nodes": [
+    {"type": "start", "id": "s", "next": "sw"},
+    {"type": "switch", "id": "sw", "next": "after", "errorHandler": {"strategy": "continue"},
+     "branches": [
+       {"name": "yes", "condition": {"field": "$INPUT.v", "operator": "eq", "value": "1"}, "next": "terminus"}
+     ]},
+    {"type": "end", "id": "terminus", "resultType": "success", "output": "dead"},
+    {"type": "end", "id": "after", "resultType": "success", "output": "$ERROR.sw.message"}
+  ]
+}

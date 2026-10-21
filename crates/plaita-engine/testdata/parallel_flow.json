@@ -1,0 +1,86 @@
+{
+ "runtime": "python",
+ "flow_id": "fan_out_go",
+ "inputType": {
+  "dataType": "object"
+ },
+ "nodes": [
+  {
+   "type": "start",
+   "id": "start",
+   "next": "r"
+  },
+  {
+   "type": "parallel",
+   "id": "r",
+   "branches": [
+    {
+     "name": "a",
+     "flow": {
+      "runtime": "python",
+      "nodes": [
+       {
+        "type": "start",
+        "id": "start",
+        "next": "ret_mul_x_2"
+       },
+       {
+        "type": "end",
+        "id": "ret_mul_x_2",
+        "output": "$F.mul($INPUT.x, 2)",
+        "resultType": "success",
+        "name": "return F.mul(INPUT.x, 2)",
+        "desc": "return F.mul(INPUT.x, 2)（第 6 行）",
+        "source_line": 6
+       }
+      ],
+      "inputType": {
+       "dataType": "object"
+      }
+     }
+    },
+    {
+     "name": "b",
+     "flow": {
+      "runtime": "python",
+      "nodes": [
+       {
+        "type": "start",
+        "id": "start",
+        "next": "ret_add_x_10"
+       },
+       {
+        "type": "end",
+        "id": "ret_add_x_10",
+        "output": "$F.add($INPUT.x, 10)",
+        "resultType": "success",
+        "name": "return F.add(INPUT.x, 10)",
+        "desc": "return F.add(INPUT.x, 10)（第 10 行）",
+        "source_line": 10
+       }
+      ],
+      "inputType": {
+       "dataType": "object"
+      }
+     }
+    }
+   ],
+   "mode": "thread",
+   "joinBranches": [
+    "a",
+    "b"
+   ],
+   "next": "ret_r",
+   "source_line": 14
+  },
+  {
+   "type": "end",
+   "id": "ret_r",
+   "output": "$NODE.r",
+   "resultType": "success",
+   "name": "return r",
+   "desc": "return r（第 15 行）",
+   "source_line": 15
+  }
+ ]
+}

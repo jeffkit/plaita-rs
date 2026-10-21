@@ -1,0 +1,11 @@
+{
+  "nodes": [
+    {"type": "start", "id": "s", "next": "sw"},
+    {"type": "switch", "id": "sw", "branches": [
+      {"name": "yes", "priority": 1, "condition": {"field": "$INPUT.v", "operator": "eq", "value": "1"}, "next": "e1"},
+      {"name": "no", "priority": 0, "condition": {"field": "$INPUT.v", "operator": "eq", "value": "0"}, "next": "e0"}
+    ]},
+    {"type": "end", "id": "e1", "resultType": "success", "output": "one"},
+    {"type": "end", "id": "e0", "resultType": "success", "output": "zero"}
+  ]
+}

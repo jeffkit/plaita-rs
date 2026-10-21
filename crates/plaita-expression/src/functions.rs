@@ -329,8 +329,7 @@ fn fn_ceil(args: &[Value]) -> Result<Value, EvalError> {
     if let Some(i) = py_int(&args[0]) {
         return Ok(Value::from(i));
     }
-    let f = py_float(&args[0])
-        .ok_or_else(|| type_err("ceil", "number", &args[0]))?;
+    let f = py_float(&args[0]).ok_or_else(|| type_err("ceil", "number", &args[0]))?;
     Ok(Value::from(f.ceil() as i64))
 }
 
@@ -339,8 +338,7 @@ fn fn_floor(args: &[Value]) -> Result<Value, EvalError> {
     if let Some(i) = py_int(&args[0]) {
         return Ok(Value::from(i));
     }
-    let f = py_float(&args[0])
-        .ok_or_else(|| type_err("floor", "number", &args[0]))?;
+    let f = py_float(&args[0]).ok_or_else(|| type_err("floor", "number", &args[0]))?;
     Ok(Value::from(f.floor() as i64))
 }
 
@@ -351,8 +349,7 @@ fn fn_trunc(args: &[Value]) -> Result<Value, EvalError> {
 
 fn fn_sqrt(args: &[Value]) -> Result<Value, EvalError> {
     arity("sqrt", args, 1)?;
-    let f = py_numeric(&args[0])
-        .ok_or_else(|| type_err("sqrt", "number", &args[0]))?;
+    let f = py_numeric(&args[0]).ok_or_else(|| type_err("sqrt", "number", &args[0]))?;
     if f < 0.0 {
         return Err(EvalError::value_error("$F.sqrt: math domain error"));
     }
@@ -542,7 +539,9 @@ fn fn_concat(args: &[Value]) -> Result<Value, EvalError> {
 fn fn_is_digit(args: &[Value]) -> Result<Value, EvalError> {
     arity("isDigit", args, 1)?;
     let s = str_arg("isDigit", args, 0)?;
-    Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_numeric())))
+    Ok(Value::Bool(
+        !s.is_empty() && s.chars().all(|c| c.is_numeric()),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -803,7 +802,9 @@ fn fn_sort(args: &[Value]) -> Result<Value, EvalError> {
 fn fn_keys(args: &[Value]) -> Result<Value, EvalError> {
     arity("keys", args, 1)?;
     let m = map_arg("keys", args, 0)?.unwrap_or_default();
-    Ok(Value::Array(m.keys().map(|k| Value::String(k.clone())).collect()))
+    Ok(Value::Array(
+        m.keys().map(|k| Value::String(k.clone())).collect(),
+    ))
 }
 
 fn fn_values(args: &[Value]) -> Result<Value, EvalError> {
@@ -858,7 +859,9 @@ fn fn_delete(args: &[Value]) -> Result<Value, EvalError> {
     };
     let key = str_arg("delete", args, 1)?;
     if !m.contains_key(&key) {
-        return Err(EvalError::key_error(format!("$F.delete: KeyError: {key:?}")));
+        return Err(EvalError::key_error(format!(
+            "$F.delete: KeyError: {key:?}"
+        )));
     }
     let mut out = m;
     out.shift_remove(&key);
@@ -868,10 +871,9 @@ fn fn_delete(args: &[Value]) -> Result<Value, EvalError> {
 /// Python `a.clear()` on a copy; returns None.
 fn fn_clear(args: &[Value]) -> Result<Value, EvalError> {
     arity("clear", args, 1)?;
-    map_arg("clear", args, 0)?
-        .ok_or_else(|| {
-            EvalError::type_error("$F.clear: 'NoneType' object has no attribute 'clear'")
-        })?;
+    map_arg("clear", args, 0)?.ok_or_else(|| {
+        EvalError::type_error("$F.clear: 'NoneType' object has no attribute 'clear'")
+    })?;
     Ok(Value::Null)
 }
 
@@ -933,8 +935,7 @@ fn fn_pop(args: &[Value]) -> Result<Value, EvalError> {
 fn fn_json_loads(args: &[Value]) -> Result<Value, EvalError> {
     arity("json_loads", args, 1)?;
     let s = str_arg("json_loads", args, 0)?;
-    serde_json::from_str::<Value>(&s)
-        .map_err(|e| EvalError::other(format!("$F.json_loads: {e}")))
+    serde_json::from_str::<Value>(&s).map_err(|e| EvalError::other(format!("$F.json_loads: {e}")))
 }
 
 /// Python json.dumps with defaults: `, ` / `: ` separators, ensure_ascii.
@@ -950,7 +951,9 @@ fn py_write_json(out: &mut String, v: &Value) -> Result<(), EvalError> {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
         Value::Bool(false) => out.push_str("false"),
-        Value::Number(n) if n.is_f64() => out.push_str(&crate::pyrepr::py_float_repr(n.as_f64().unwrap())),
+        Value::Number(n) if n.is_f64() => {
+            out.push_str(&crate::pyrepr::py_float_repr(n.as_f64().unwrap()))
+        }
         Value::Number(n) => out.push_str(&n.to_string()),
         Value::String(s) => out.push_str(&py_json_quote(s)),
         Value::Array(items) => {
@@ -1153,10 +1156,14 @@ fn fn_today(args: &[Value]) -> Result<Value, EvalError> {
         Some(other) => return Err(type_err("today", "str", other)),
     };
     let now = chrono::Local::now();
-    let today = now
-        .with_time(chrono::NaiveTime::MIN)
-        .single()
-        .unwrap_or(now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(now.timezone()).single().unwrap_or(now));
+    let today = now.with_time(chrono::NaiveTime::MIN).single().unwrap_or(
+        now.date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(now.timezone())
+            .single()
+            .unwrap_or(now),
+    );
     Ok(Value::String(py_strftime(&today, &layout)))
 }
 
@@ -1301,7 +1308,10 @@ mod tests {
         assert_eq!(call("$F.add(1, 2)", e.clone()), json!(3));
         assert_eq!(call("$F.add(1, 2.5)", e.clone()), json!(3.5));
         assert_eq!(call("$F.add('a', 'b')", e.clone()), json!("ab"));
-        assert_eq!(call("$F.add($INPUT.a, $INPUT.b)", json!({"a": [1], "b": [2, 3]})), json!([1, 2, 3]));
+        assert_eq!(
+            call("$F.add($INPUT.a, $INPUT.b)", json!({"a": [1], "b": [2, 3]})),
+            json!([1, 2, 3])
+        );
         assert_eq!(call("$F.sub(5, 2)", e.clone()), json!(3));
         assert_eq!(call("$F.mul(3, 4)", e.clone()), json!(12));
         assert_eq!(call("$F.mul('ab', 3)", e.clone()), json!("ababab"));
@@ -1309,7 +1319,10 @@ mod tests {
         assert_eq!(call("$F.div(4, 2)", e.clone()), json!(2.0));
         assert_eq!(call("$F.div(1, 3)", e.clone()), json!(0.3333333333333333));
         assert_eq!(call("$F.mod(-7, 3)", e.clone()), json!(2));
-        assert_eq!(call("$F.mod('%s=%d', $INPUT.t)", json!({"t": ["x", 5]})), json!("x=5"));
+        assert_eq!(
+            call("$F.mod('%s=%d', $INPUT.t)", json!({"t": ["x", 5]})),
+            json!("x=5")
+        );
         assert_eq!(call("$F.pow(2, 10)", e.clone()), json!(1024));
         assert_eq!(call("$F.pow(2, -2)", e.clone()), json!(0.25));
         assert_eq!(call("$F.abs(-3.5)", e.clone()), json!(3.5));
@@ -1332,17 +1345,36 @@ mod tests {
         let e = json!({});
         assert_eq!(call("$F.upper('straße')", e.clone()), json!("STRASSE"));
         assert_eq!(call("$F.lower('ABC')", e.clone()), json!("abc"));
-        assert_eq!(call("$F.capitalize('hello WORLD')", e.clone()), json!("Hello world"));
-        assert_eq!(call("$F.title(\"they're bill's\")", e.clone()), json!("They'Re Bill'S"));
+        assert_eq!(
+            call("$F.capitalize('hello WORLD')", e.clone()),
+            json!("Hello world")
+        );
+        assert_eq!(
+            call("$F.title(\"they're bill's\")", e.clone()),
+            json!("They'Re Bill'S")
+        );
         assert_eq!(call("$F.strip('  x  ')", e.clone()), json!("x"));
         assert_eq!(call("$F.replace('aaa', 'a', 'b')", e.clone()), json!("bbb"));
-        assert_eq!(call("$F.split('a,b,c', ',')", e.clone()), json!(["a", "b", "c"]));
+        assert_eq!(
+            call("$F.split('a,b,c', ',')", e.clone()),
+            json!(["a", "b", "c"])
+        );
         assert!(eval_str("$F.split('abc', '')", &roots(e.clone())).is_err());
-        assert_eq!(call("$F.join($INPUT.items, '-')", json!({"items": ["a", "b"]}), ), json!("a-b"));
-        assert!(eval_str("$F.join($INPUT.items, '-')", &roots(json!({"items": [1, "b"]}))).is_err());
+        assert_eq!(
+            call("$F.join($INPUT.items, '-')", json!({"items": ["a", "b"]}),),
+            json!("a-b")
+        );
+        assert!(eval_str(
+            "$F.join($INPUT.items, '-')",
+            &roots(json!({"items": [1, "b"]}))
+        )
+        .is_err());
         assert_eq!(call("$F.startswith('abc', 'ab')", e.clone()), json!(true));
         assert_eq!(call("$F.endswith('abc', 'bc')", e.clone()), json!(true));
-        assert_eq!(call("$F.concat(1, 'a', None, $INPUT.x)", json!({"x": [1]})), json!("1aNone[1]"));
+        assert_eq!(
+            call("$F.concat(1, 'a', None, $INPUT.x)", json!({"x": [1]})),
+            json!("1aNone[1]")
+        );
         assert_eq!(call("$F.isDigit('123')", e.clone()), json!(true));
         assert_eq!(call("$F.isDigit('1a')", e.clone()), json!(false));
     }
@@ -1352,19 +1384,46 @@ mod tests {
         assert_eq!(call("$F.len('héllo')", json!({})), json!(5));
         assert_eq!(call("$F.len($INPUT.a)", json!({"a": [1, 2]})), json!(2));
         assert_eq!(call("$F.len($INPUT.a)", json!({"a": {"x": 1}})), json!(1));
-        assert_eq!(call("$F.index($INPUT.a, 1)", json!({"a": [3, 1, 2]})), json!(1));
+        assert_eq!(
+            call("$F.index($INPUT.a, 1)", json!({"a": [3, 1, 2]})),
+            json!(1)
+        );
         assert!(eval_str("$F.index($INPUT.a, 9)", &roots(json!({"a": [1]}))).is_err());
-        assert_eq!(call("$F.slice($INPUT.a, 1, 3)", json!({"a": [1, 2, 3, 4]})), json!([2, 3]));
+        assert_eq!(
+            call("$F.slice($INPUT.a, 1, 3)", json!({"a": [1, 2, 3, 4]})),
+            json!([2, 3])
+        );
         assert_eq!(call("$F.slice('hello', -3, -1)", json!({})), json!("ll"));
-        assert_eq!(call("$F.append($INPUT.a, 2)", json!({"a": [1]})), json!([1, 2]));
-        assert_eq!(call("$F.insert($INPUT.a, 1, 'x')", json!({"a": [1, 2, 3]})), json!([1, "x", 2, 3]));
-        assert_eq!(call("$F.remove($INPUT.a, 1)", json!({"a": [1, 2, 1]})), json!([2, 1]));
-        assert_eq!(call("$F.reverse($INPUT.a)", json!({"a": [1, 2]})), json!([2, 1]));
+        assert_eq!(
+            call("$F.append($INPUT.a, 2)", json!({"a": [1]})),
+            json!([1, 2])
+        );
+        assert_eq!(
+            call("$F.insert($INPUT.a, 1, 'x')", json!({"a": [1, 2, 3]})),
+            json!([1, "x", 2, 3])
+        );
+        assert_eq!(
+            call("$F.remove($INPUT.a, 1)", json!({"a": [1, 2, 1]})),
+            json!([2, 1])
+        );
+        assert_eq!(
+            call("$F.reverse($INPUT.a)", json!({"a": [1, 2]})),
+            json!([2, 1])
+        );
         assert_eq!(call("$F.getListItem('héllo', 1)", json!({})), json!("é"));
-        assert_eq!(call("$F.getListItem($INPUT.a, -1)", json!({"a": [9]})), json!(9));
+        assert_eq!(
+            call("$F.getListItem($INPUT.a, -1)", json!({"a": [9]})),
+            json!(9)
+        );
         assert!(eval_str("$F.getListItem($INPUT.a, 5)", &roots(json!({"a": [9]}))).is_err());
-        assert_eq!(call("$F.sort($INPUT.a)", json!({"a": [3, 1, 2]})), json!([1, 2, 3]));
-        assert_eq!(call("$F.sort($INPUT.a, None, true)", json!({"a": [3, 1, 2]})), json!([3, 2, 1]));
+        assert_eq!(
+            call("$F.sort($INPUT.a)", json!({"a": [3, 1, 2]})),
+            json!([1, 2, 3])
+        );
+        assert_eq!(
+            call("$F.sort($INPUT.a, None, true)", json!({"a": [3, 1, 2]})),
+            json!([3, 2, 1])
+        );
         assert_eq!(
             call("$F.sort($INPUT.a, 'k')", json!({"a": [{"k": 3}, {"k": 1}]})),
             json!([{"k": 1}, {"k": 3}])
@@ -1375,24 +1434,60 @@ mod tests {
             call("$F.keys($INPUT.a)", json!({"a": {"b": 1, "a": 2, "c": 3}})),
             json!(["b", "a", "c"])
         );
-        assert_eq!(call("$F.values($INPUT.a)", json!({"a": {"b": 1, "a": 2}})), json!([1, 2]));
-        assert_eq!(call("$F.items($INPUT.a)", json!({"a": {"b": 1}})), json!([["b", 1]]));
-        assert_eq!(call("$F.get($INPUT.a, 'k')", json!({"a": {"k": 5}})), json!(5));
-        assert_eq!(call("$F.get($INPUT.a, 'no', 7)", json!({"a": {"k": 5}})), json!(7));
-        assert_eq!(call("$F.get($INPUT.a, 'no')", json!({"a": {"k": 5}})), json!(null));
+        assert_eq!(
+            call("$F.values($INPUT.a)", json!({"a": {"b": 1, "a": 2}})),
+            json!([1, 2])
+        );
+        assert_eq!(
+            call("$F.items($INPUT.a)", json!({"a": {"b": 1}})),
+            json!([["b", 1]])
+        );
+        assert_eq!(
+            call("$F.get($INPUT.a, 'k')", json!({"a": {"k": 5}})),
+            json!(5)
+        );
+        assert_eq!(
+            call("$F.get($INPUT.a, 'no', 7)", json!({"a": {"k": 5}})),
+            json!(7)
+        );
+        assert_eq!(
+            call("$F.get($INPUT.a, 'no')", json!({"a": {"k": 5}})),
+            json!(null)
+        );
         // pop is a mutator: live roots are refused (plaita#69); fresh
         // containers are the legal targets
-        assert_eq!(call("$F.pop($F.slice($INPUT.a, 0, 3), -1)", json!({"a": [1, 2, 3]})), json!(3));
-        assert_eq!(call("$F.pop($F.json_loads('{\"k\": 5}'), 'k')", json!({})), json!(5));
+        assert_eq!(
+            call(
+                "$F.pop($F.slice($INPUT.a, 0, 3), -1)",
+                json!({"a": [1, 2, 3]})
+            ),
+            json!(3)
+        );
+        assert_eq!(
+            call("$F.pop($F.json_loads('{\"k\": 5}'), 'k')", json!({})),
+            json!(5)
+        );
     }
 
     #[test]
     fn json_and_logic() {
         let e = json!({});
-        assert_eq!(call("$F.json_loads('{\"a\": [1, 2.5]}')", e.clone()), json!({"a": [1, 2.5]}));
+        assert_eq!(
+            call("$F.json_loads('{\"a\": [1, 2.5]}')", e.clone()),
+            json!({"a": [1, 2.5]})
+        );
         assert!(eval_str("$F.json_loads('[1, 2,]')", &roots(e.clone())).is_err());
-        assert_eq!(call("$F.json_dumps($INPUT.a)", json!({"a": {"b": 2, "c": [1.0]}})), json!("{\"b\": 2, \"c\": [1.0]}"));
-        assert_eq!(call("$F.json_dumps('é中')", e.clone()), json!("\"\\u00e9\\u4e2d\""));
+        assert_eq!(
+            call(
+                "$F.json_dumps($INPUT.a)",
+                json!({"a": {"b": 2, "c": [1.0]}})
+            ),
+            json!("{\"b\": 2, \"c\": [1.0]}")
+        );
+        assert_eq!(
+            call("$F.json_dumps('é中')", e.clone()),
+            json!("\"\\u00e9\\u4e2d\"")
+        );
         assert_eq!(call("$F.and(1, 2)", e.clone()), json!(2));
         assert_eq!(call("$F.and(0, 2)", e.clone()), json!(0));
         assert_eq!(call("$F.or('', 0, '3')", e.clone()), json!("3"));
@@ -1414,10 +1509,22 @@ mod tests {
         assert_eq!(call("$F.ifelse(1, 'yes', 'no')", e.clone()), json!("yes"));
         assert_eq!(call("$F.ifelse('', 'yes', 'no')", e.clone()), json!("no"));
         assert_eq!(call("$F.contains('hello', 'ell')", e.clone()), json!(true));
-        assert_eq!(call("$F.notContains($INPUT.a, 3)", json!({"a": [1, 2]})), json!(true));
-        assert_eq!(call("$F.in(1, $INPUT.a)", json!({"a": [1, 2]})), json!(true));
-        assert_eq!(call("$F.notIn(3, $INPUT.a)", json!({"a": [1, 2]})), json!(true));
-        assert_eq!(call("$F.between(5, $INPUT.a)", json!({"a": [1, 10]})), json!(true));
+        assert_eq!(
+            call("$F.notContains($INPUT.a, 3)", json!({"a": [1, 2]})),
+            json!(true)
+        );
+        assert_eq!(
+            call("$F.in(1, $INPUT.a)", json!({"a": [1, 2]})),
+            json!(true)
+        );
+        assert_eq!(
+            call("$F.notIn(3, $INPUT.a)", json!({"a": [1, 2]})),
+            json!(true)
+        );
+        assert_eq!(
+            call("$F.between(5, $INPUT.a)", json!({"a": [1, 10]})),
+            json!(true)
+        );
         assert_eq!(call("$F.like('hello', 'ell')", e), json!(true));
     }
 

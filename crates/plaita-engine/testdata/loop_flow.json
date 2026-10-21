@@ -1,0 +1,52 @@
+{
+ "runtime": "python",
+ "flow_id": "double_numbers_go",
+ "inputType": {
+  "dataType": "object"
+ },
+ "nodes": [
+  {
+   "type": "start",
+   "id": "start",
+   "next": "dbl"
+  },
+  {
+   "type": "end",
+   "id": "ret_dbl",
+   "output": "$NODE.dbl",
+   "resultType": "success",
+   "name": "return NODE.dbl",
+   "desc": "return NODE.dbl（第 12 行）",
+   "source_line": 12
+  },
+  {
+   "type": "loop",
+   "id": "dbl",
+   "collection": "$INPUT.items",
+   "childFlow": {
+    "runtime": "python",
+    "inputType": {
+     "dataType": "object"
+    },
+    "nodes": [
+     {
+      "type": "start",
+      "id": "start",
+      "next": "ret_mul_x_2"
+     },
+     {
+      "type": "end",
+      "id": "ret_mul_x_2",
+      "output": "$F.mul($INPUT.item, 2)",
+      "resultType": "success",
+      "name": "return F.mul(x, 2)",
+      "desc": "return F.mul(x, 2)（第 11 行）",
+      "source_line": 11
+     }
+    ]
+   },
+   "next": "ret_dbl",
+   "source_line": 10
+  }
+ ]
+}

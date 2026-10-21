@@ -1,0 +1,19 @@
+{
+  "flow_id": "expr_mash",
+  "inputType": {"dataType": "object"},
+  "nodes": [
+    {"type": "start", "id": "s", "next": "a"},
+    {"type": "assignment", "id": "a", "next": "b",
+     "output": {"full": "{%$INPUT.first%} {%$INPUT.last%}", "n": "$F.add($INPUT.n, 3)",
+                "flag": "$F.ifelse($INPUT.n, 'truthy', 'falsy')"}},
+    {"type": "child", "id": "b", "next": "e",
+     "input": {"s": "$F.concat('x=', $NODE.a.n)", "items": "$F.json_loads('[1, 2.5, \"three\"]')"},
+     "childFlow": {
+       "nodes": [
+         {"type": "start", "id": "start", "next": "ret"},
+         {"type": "end", "id": "ret", "resultType": "success",
+          "output": {"s": "$INPUT.s", "len": "$F.len($INPUT.items)", "neg": "$F.getListItem($INPUT.items, -1)"}}
+       ]}},
+    {"type": "end", "id": "e", "resultType": "success", "output": {"a": "$NODE.a", "b": "$NODE.b"}}
+  ]
+}

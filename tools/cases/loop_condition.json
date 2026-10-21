@@ -1,0 +1,15 @@
+{
+  "flow_id": "loopc",
+  "nodes": [
+    {"type": "start", "id": "s", "next": "l"},
+    {"type": "loop", "id": "l", "next": "e",
+     "collection": "[1, 2, 3, 4, 5]",
+     "condition": {"field": "$LOOP-INDEX", "operator": "lt", "value": 3},
+     "childFlow": {
+       "nodes": [
+         {"type": "start", "id": "start", "next": "e"},
+         {"type": "end", "id": "e", "resultType": "success", "output": "$F.mul($INPUT.item, 10)"}
+       ]}},
+    {"type": "end", "id": "e", "resultType": "success", "output": "$NODE.l"}
+  ]
+}

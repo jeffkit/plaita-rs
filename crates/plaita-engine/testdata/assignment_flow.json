@@ -1,0 +1,122 @@
+{
+  "id": "oz1aXXHb",
+  "runtime": "python",
+  "version": "1.0.0",
+  "inputType": {
+    "dataType": "object",
+    "name": "aa",
+    "label": "aa",
+    "required": false,
+    "properties": {
+      "bb": {
+        "dataType": "string",
+        "name": "bb",
+        "label": "bb",
+        "default": "",
+        "required": false
+      }
+    }
+  },
+  "outputType": {
+    "dataType": "object",
+    "name": "cc",
+    "label": "cc",
+    "required": false,
+    "properties": {
+      "dd": {
+        "dataType": "string",
+        "name": "dd",
+        "label": "dd",
+        "default": "",
+        "required": false
+      }
+    }
+  },
+  "nodes": [
+    {
+      "type": "start",
+      "name": "开始",
+      "id": "node-0csVAllL",
+      "next": "node-G3Wglb5e"
+    },
+    {
+      "type": "switch",
+      "name": "条件",
+      "branches": [
+        {
+          "name": "default",
+          "label": "默认分支",
+          "isDefault": true,
+          "priority": 0,
+          "next": "node-vdu1ncws"
+        },
+        {
+          "name": "branch-yEzyJVJU",
+          "label": "分支branch-yEzyJVJU",
+          "desc": "",
+          "priority": 1,
+          "isDefault": false,
+          "condition": {
+            "relation": "and",
+            "conditions": [
+              {
+                "field": "$INPUT.bb",
+                "operator": "eq",
+                "value": "123"
+              }
+            ]
+          },
+          "next": "node-b_dED0Mj"
+        }
+      ],
+      "id": "node-G3Wglb5e"
+    },
+    {
+      "type": "end",
+      "name": "结束",
+      "output": {
+        "dd": "$INPUT.bb"
+      },
+      "resultType": "success",
+      "id": "node-vdu1ncws"
+    },
+    {
+      "type": "assignment",
+      "name": "赋值",
+      "upstreamOutput": [
+        {
+          "upstream": "node-G3Wglb5e",
+          "value": {
+            "aaaaa": "456"
+          }
+        }
+      ],
+      "outputType": {
+        "dataType": "object",
+        "name": "aa",
+        "label": "aa",
+        "required": false,
+        "properties": {
+          "aaaaa": {
+            "dataType": "string",
+            "name": "aaaaa",
+            "label": "aaaaa",
+            "default": "",
+            "required": false
+          }
+        }
+      },
+      "id": "node-b_dED0Mj",
+      "next": "node-ojv3ZrHT"
+    },
+    {
+      "type": "end",
+      "name": "结束",
+      "output": {
+        "dd": "$NODE.node-b_dED0Mj.aaaaa"
+      },
+      "resultType": "success",
+      "id": "node-ojv3ZrHT"
+    }
+  ]
+}

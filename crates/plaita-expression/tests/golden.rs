@@ -86,10 +86,17 @@ fn plaita_expression_golden() {
                 json_normalize(&tc.expected),
                 "{}{}",
                 tc.id,
-                if tc.note.is_empty() { String::new() } else { format!(" ({})", tc.note) }
+                if tc.note.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", tc.note)
+                }
             );
         }
         ran += 1;
     }
-    assert_eq!(ran, 43, "the export carries 45 cases, 2 parse_function API cases skipped");
+    assert_eq!(
+        ran, 43,
+        "the export carries 45 cases, 2 parse_function API cases skipped"
+    );
 }

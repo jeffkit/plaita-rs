@@ -29,7 +29,7 @@ mod value;
 pub use error::{ErrorKind, EvalError, ParseError};
 pub use eval::{
     compare as py_compare, contains, equal, error_kind, eval_expr, eval_str, eval_value, truthy,
-    BUILTIN_ROOTS, MapRoots, Roots,
+    MapRoots, Roots, BUILTIN_ROOTS,
 };
 pub use functions::{count as function_count, lookup as lookup_function, names as function_names};
 pub use parser::{parse, parse_template, Expr, Segment, TemplatePart};

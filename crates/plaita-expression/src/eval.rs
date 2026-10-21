@@ -95,8 +95,19 @@ impl Roots for MapRoots<'_> {
 /// the system roots, e.g. `LOOP-ITEM`). The engine's implementation folds
 /// these into its root table; the default is an error for unknown roots.
 pub const BUILTIN_ROOTS: &[&str] = &[
-    "INPUT", "NODE", "PARENT", "ERROR", "ENV", "GLOBAL", "BRANCH", "FLOW_ID", "FLOW",
-    "LAST_NODE", "EXECUTION_ID", "NULL", "EMPTYSTRING",
+    "INPUT",
+    "NODE",
+    "PARENT",
+    "ERROR",
+    "ENV",
+    "GLOBAL",
+    "BRANCH",
+    "FLOW_ID",
+    "FLOW",
+    "LAST_NODE",
+    "EXECUTION_ID",
+    "NULL",
+    "EMPTYSTRING",
 ];
 
 /// Evaluates any JSON value through the facade (containers recurse,
@@ -236,7 +247,11 @@ fn strip_raw_modifier(root: &str, path: &[Segment], nodes: &Value) -> Vec<Segmen
     if second.is_empty() || second.chars().all(|c| c.is_ascii_digit()) {
         return path.to_vec();
     }
-    if nodes.as_object().map(|o| o.contains_key("raw")).unwrap_or(false) {
+    if nodes
+        .as_object()
+        .map(|o| o.contains_key("raw"))
+        .unwrap_or(false)
+    {
         return path.to_vec();
     }
     path[1..].to_vec()
@@ -285,7 +300,9 @@ fn eval_var_path(root: &str, root_value: &Value, path: &[Segment]) -> Result<Val
                     let n = items.len() as i64;
                     let j = if *i < 0 { *i + n } else { *i };
                     if j < 0 || j >= n {
-                        return Err(EvalError::index_error("IndexError: list index out of range"));
+                        return Err(EvalError::index_error(
+                            "IndexError: list index out of range",
+                        ));
                     }
                     cur = items[j as usize].clone();
                 }
@@ -310,16 +327,36 @@ fn eval_var_path(root: &str, root_value: &Value, path: &[Segment]) -> Result<Val
 
 /// $F functions Python's expression.py registers with has_side_effects=True.
 const MUTATOR_FUNCS: &[&str] = &[
-    "set", "setDictValue", "delete", "delDictValue", "clear", "clearDict", "pop",
-    "delListItem", "setListItem",
+    "set",
+    "setDictValue",
+    "delete",
+    "delDictValue",
+    "clear",
+    "clearDict",
+    "pop",
+    "delListItem",
+    "setListItem",
 ];
 
 /// Pure $F calls whose result is a NEW list by construction — the one legal
 /// target shape for a mutator.
 const FRESH_LIST_PRODUCERS: &[&str] = &[
-    "append", "addListItem", "extend", "insert", "insertListItem", "remove", "slice",
-    "reverse", "sort", "split", "keys", "values", "items", "getDictKeys",
-    "getDictValues", "json_loads",
+    "append",
+    "addListItem",
+    "extend",
+    "insert",
+    "insertListItem",
+    "remove",
+    "slice",
+    "reverse",
+    "sort",
+    "split",
+    "keys",
+    "values",
+    "items",
+    "getDictKeys",
+    "getDictValues",
+    "json_loads",
 ];
 
 fn is_call(expr: &Expr) -> Option<&str> {
@@ -333,7 +370,10 @@ fn references_live_root(expr: &Expr) -> bool {
     match expr {
         Expr::Const(_) => false,
         Expr::Var { root, .. } => {
-            matches!(canonical_root(root).as_str(), "INPUT" | "NODE" | "GLOBAL" | "ENV" | "ERROR" | "PARENT")
+            matches!(
+                canonical_root(root).as_str(),
+                "INPUT" | "NODE" | "GLOBAL" | "ENV" | "ERROR" | "PARENT"
+            )
         }
         Expr::Call { args, .. } => args.iter().any(references_live_root),
     }
@@ -388,7 +428,11 @@ pub fn did_you_mean(bad: &str, candidates: &[&str]) -> String {
         .map(|c| (similarity(bad, c), *c))
         .filter(|(s, _)| *s >= 0.6)
         .collect();
-    hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(b.1)));
+    hits.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(b.1))
+    });
     hits.truncate(3);
     if hits.is_empty() {
         return String::new();
@@ -476,7 +520,10 @@ mod tests {
         assert_eq!(eval_value(&json!(null), &r).unwrap(), json!(null));
         assert_eq!(eval_value(&json!(true), &r).unwrap(), json!(true));
         assert_eq!(eval_value(&json!("hello"), &r).unwrap(), json!("hello"));
-        assert_eq!(eval_value(&json!("{user.name}"), &r).unwrap(), json!("{user.name}"));
+        assert_eq!(
+            eval_value(&json!("{user.name}"), &r).unwrap(),
+            json!("{user.name}")
+        );
     }
 
     #[test]
@@ -501,10 +548,18 @@ mod tests {
 
     #[test]
     fn variable_paths() {
-        let r = roots(json!({"names": ["hello"], "users": [{"name": "hello"}], "a": {"b": {"c": "deep"}}}));
-        assert_eq!(eval_str("$INPUT", &r).unwrap(), json!({"names": ["hello"], "users": [{"name": "hello"}], "a": {"b": {"c": "deep"}}}));
+        let r = roots(
+            json!({"names": ["hello"], "users": [{"name": "hello"}], "a": {"b": {"c": "deep"}}}),
+        );
+        assert_eq!(
+            eval_str("$INPUT", &r).unwrap(),
+            json!({"names": ["hello"], "users": [{"name": "hello"}], "a": {"b": {"c": "deep"}}})
+        );
         assert_eq!(eval_str("$INPUT.names[0]", &r).unwrap(), json!("hello"));
-        assert_eq!(eval_str("$INPUT.users.0", &r).unwrap(), json!({"name": "hello"}));
+        assert_eq!(
+            eval_str("$INPUT.users.0", &r).unwrap(),
+            json!({"name": "hello"})
+        );
         assert_eq!(eval_str("$INPUT.users.0.name", &r).unwrap(), json!("hello"));
         assert_eq!(eval_str("$INPUT.a.b.c", &r).unwrap(), json!("deep"));
         assert_eq!(eval_str("$INPUT.missing", &r).unwrap(), json!(null));
@@ -550,18 +605,27 @@ mod tests {
             eval_str("let see: {%$F.add(3, $INPUT)%}", &r).unwrap(),
             json!("let see: 6")
         );
-        assert_eq!(eval_str("x {%@INPUT[0].name%} y", &r).unwrap(), json!("x {%@INPUT[0].name%} y"));
+        assert_eq!(
+            eval_str("x {%@INPUT[0].name%} y", &r).unwrap(),
+            json!("x {%@INPUT[0].name%} y")
+        );
         assert_eq!(eval_str("hi {%world%}", &r).unwrap(), json!("hi {%world%}"));
         assert_eq!(eval_str("a {% b", &r).unwrap(), json!("a {% b"));
         let r = roots(json!("x"));
-        assert_eq!(eval_str("a {% $INPUT %} b {%", &r).unwrap(), json!("a x b {%"));
+        assert_eq!(
+            eval_str("a {% $INPUT %} b {%", &r).unwrap(),
+            json!("a x b {%")
+        );
         // Python str() rendering rules inside templates
         let r = roots(json!({"a": null, "b": [1, 2.5], "c": "s"}));
         assert_eq!(
             eval_str("{%$INPUT%}", &r).unwrap(),
             json!("{'a': None, 'b': [1, 2.5], 'c': 's'}")
         );
-        assert_eq!(eval_str("{% true %} {% None %} {% 1.5 %}", &r).unwrap(), json!("True None 1.5"));
+        assert_eq!(
+            eval_str("{% true %} {% None %} {% 1.5 %}", &r).unwrap(),
+            json!("True None 1.5")
+        );
     }
 
     #[test]
@@ -572,9 +636,15 @@ mod tests {
         let err = eval_str("$F.set($INPUT.m, 'b', 2)", &r).unwrap_err();
         assert_eq!(err.kind, ErrorKind::ValueError);
         // fresh producer targets are fine
-        assert_eq!(eval_str("$F.pop($F.append($INPUT.list, 4), 0)", &r).unwrap(), json!(1));
+        assert_eq!(
+            eval_str("$F.pop($F.append($INPUT.list, 4), 0)", &r).unwrap(),
+            json!(1)
+        );
         // fresh-producer targets are fine for mutators
-        assert_eq!(eval_str("$F.set($F.json_loads('{}'), 'a', 1)", &r).unwrap(), json!(null));
+        assert_eq!(
+            eval_str("$F.set($F.json_loads('{}'), 'a', 1)", &r).unwrap(),
+            json!(null)
+        );
     }
 
     #[test]
@@ -584,7 +654,10 @@ mod tests {
         let mut inner = MapRoots::with_parent(&outer);
         inner.set("INPUT", json!({"x": "inner"}));
         assert_eq!(eval_str("$INPUT.x", &inner).unwrap(), json!("inner"));
-        assert_eq!(eval_str("$PARENT.$INPUT.x", &inner).unwrap(), json!("outer"));
+        assert_eq!(
+            eval_str("$PARENT.$INPUT.x", &inner).unwrap(),
+            json!("outer")
+        );
         assert_eq!(eval_str("$PARENT.INPUT.x", &inner).unwrap(), json!("outer"));
         assert!(eval_str("$PARENT", &inner).is_ok());
         assert!(eval_str("$PARENT.$INPUT.x", &MapRoots::new()).is_err());

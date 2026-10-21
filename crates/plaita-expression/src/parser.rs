@@ -81,7 +81,9 @@ pub fn parse_template(src: &str) -> Option<Vec<TemplatePart>> {
         if chars[i] == '{' && chars[i + 1] == '%' {
             if let Some((expr, end)) = try_interpolation(&chars, i) {
                 if literal_start < i {
-                    parts.push(TemplatePart::Literal(chars[literal_start..i].iter().collect()));
+                    parts.push(TemplatePart::Literal(
+                        chars[literal_start..i].iter().collect(),
+                    ));
                 }
                 parts.push(TemplatePart::Interp(expr));
                 matched = true;
@@ -96,7 +98,9 @@ pub fn parse_template(src: &str) -> Option<Vec<TemplatePart>> {
         return None;
     }
     if literal_start < chars.len() {
-        parts.push(TemplatePart::Literal(chars[literal_start..].iter().collect()));
+        parts.push(TemplatePart::Literal(
+            chars[literal_start..].iter().collect(),
+        ));
     }
     Some(parts)
 }
@@ -163,14 +167,9 @@ impl Parser {
     }
 
     fn starts_with(&self, s: &str) -> bool {
-        let mut i = self.pos;
-        for c in s.chars() {
-            if self.chars.get(i) != Some(&c) {
-                return false;
-            }
-            i += 1;
-        }
-        true
+        s.chars()
+            .enumerate()
+            .all(|(offset, c)| self.chars.get(self.pos + offset) == Some(&c))
     }
 
     fn skip_ws(&mut self) {
@@ -238,7 +237,11 @@ impl Parser {
             }
         }
         match self.peek() {
-            Some('"') | Some('\'') => return self.parse_string().map(|s| Some(Expr::Const(Value::String(s)))),
+            Some('"') | Some('\'') => {
+                return self
+                    .parse_string()
+                    .map(|s| Some(Expr::Const(Value::String(s))))
+            }
             Some(c) if c.is_ascii_digit() || c == '.' || c == '+' || c == '-' => {
                 if let Some(v) = self.try_parse_number() {
                     return Ok(Some(Expr::Const(v)));
@@ -495,15 +498,27 @@ mod tests {
     #[test]
     fn variables() {
         assert_eq!(parse("$INPUT").unwrap(), var("INPUT", vec![]));
-        assert_eq!(parse("$INPUT.a.b").unwrap(), var("INPUT", vec![f("a"), f("b")]));
-        assert_eq!(parse("$INPUT[0].name").unwrap(), var("INPUT", vec![i(0), f("name")]));
+        assert_eq!(
+            parse("$INPUT.a.b").unwrap(),
+            var("INPUT", vec![f("a"), f("b")])
+        );
+        assert_eq!(
+            parse("$INPUT[0].name").unwrap(),
+            var("INPUT", vec![i(0), f("name")])
+        );
         assert_eq!(parse("$INPUT[-1]").unwrap(), var("INPUT", vec![i(-1)]));
-        assert_eq!(parse("$INPUT.users.0").unwrap(), var("INPUT", vec![f("users"), i(0)]));
+        assert_eq!(
+            parse("$INPUT.users.0").unwrap(),
+            var("INPUT", vec![f("users"), i(0)])
+        );
         assert_eq!(
             parse("$NODE.node-b_dED0Mj.aaaaa").unwrap(),
             var("NODE", vec![f("node-b_dED0Mj"), f("aaaaa")])
         );
-        assert_eq!(parse("$PARENT.$NODE.x").unwrap(), var("PARENT", vec![f("$NODE"), f("x")]));
+        assert_eq!(
+            parse("$PARENT.$NODE.x").unwrap(),
+            var("PARENT", vec![f("$NODE"), f("x")])
+        );
         assert_eq!(parse("$").unwrap(), var("", vec![]));
         assert_eq!(parse("$.a").unwrap(), var("", vec![f("a")]));
         assert_eq!(parse(" $INPUT ").unwrap(), var("INPUT", vec![]));
@@ -531,7 +546,13 @@ mod tests {
                 ]
             }
         );
-        assert_eq!(parse("$F.now()").unwrap(), Expr::Call { name: "now".into(), args: vec![] });
+        assert_eq!(
+            parse("$F.now()").unwrap(),
+            Expr::Call {
+                name: "now".into(),
+                args: vec![]
+            }
+        );
         assert_eq!(
             parse(r#"$F.concat('it''s', "a\"b", 'x\'y', 'tab\t')"#).unwrap(),
             Expr::Call {
