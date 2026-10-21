@@ -233,7 +233,7 @@ fn go_examples() {
         ))
         .unwrap_or_else(|e| panic!("read {name}: {e}"));
         let flow = ir::load(&data).unwrap();
-        let input = if name == "add" {
+        let input = if name == "go-example-add" {
             json!({"a": 2, "b": 3})
         } else {
             json!({})
@@ -241,7 +241,7 @@ fn go_examples() {
         let got = flow.execute(&input, &Host::new()).unwrap();
         // $F.add(2, 3) stays an int under Python semantics (int×int → int);
         // the float outputType only validates, it does not coerce
-        let want = if name == "add" {
+        let want = if name == "go-example-add" {
             json!(5)
         } else {
             json!("Hello, world!")
