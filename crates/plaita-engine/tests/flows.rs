@@ -221,12 +221,14 @@ fn plaita_condition_operators() {
     );
 }
 
-/// the go examples run too (addition flow with input validation).
+/// the go examples run too (addition flow with input validation). The two
+/// documents are vendored from plaita-go `examples/` (same-contents copies,
+/// do not hand-edit) so the suite has no sibling-checkout dependency.
 #[test]
 fn go_examples() {
     for name in ["add", "hello_world"] {
         let data = std::fs::read(format!(
-            "{}/../../../plaita-go/examples/{name}.json",
+            "{}/testdata/{name}.json",
             env!("CARGO_MANIFEST_DIR")
         ))
         .unwrap_or_else(|e| panic!("read {name}: {e}"));

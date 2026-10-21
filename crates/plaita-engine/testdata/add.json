@@ -1,0 +1,40 @@
+{
+  "id": "addition-flow",
+  "name": "Addition Flow",
+  "inputType": {
+    "dataType": "object",
+    "properties": {
+      "a": {
+        "dataType": "integer"
+      },
+      "b": {
+        "dataType": "integer"
+      }
+    }
+  },
+  "outputType": {
+    "dataType": "float"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "next": "addition"
+    },
+    {
+      "id": "addition",
+      "type": "assignment",
+      "next": "end",
+      "outputType": {
+        "dataType": "float"
+      },
+      "output": "$F.add($INPUT.a, $INPUT.b)"
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "resultType": "success",
+      "output": "$NODE.addition"
+    }
+  ]
+}
