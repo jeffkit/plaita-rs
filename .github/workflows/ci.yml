@@ -1,0 +1,47 @@
+# Deliberately thin: fmt + clippy + tests, single job, all-local suite (~1min).
+# Shape parity with plaita-go's ci.yml: pinned `uses:` SHAs with version
+# comments, workflow-level permissions, job timeout, concurrency cancelling
+# PR runs only (a cancelled main run is a false red for the landing gate).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Pinned to a 40-char commit SHA; bump the SHA and the version comment
+      # together.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      # Pinned toolchain (the runner's preinstalled "stable" must not float
+      # under the repo) — the Rust analogue of plaita-go's go-version-file.
+      # A repo-level rust-toolchain.toml would make every LOCAL rustup call
+      # re-resolve the channel manifest (network dependency); the CI-only
+      # pin keeps local builds offline-friendly.
+      - name: install pinned toolchain
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+          rustup override set 1.98.1
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace

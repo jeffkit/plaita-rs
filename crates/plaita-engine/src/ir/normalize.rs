@@ -790,7 +790,9 @@ pub fn normalize_property(p: &mut Value) -> Result<(), String> {
 /// no wildcards, no blank or whitespace-padded entries.
 fn validate_expose_env(v: &Value) -> Result<(), String> {
     let Some(list) = v.as_array() else {
-        return Err("exposeEnv must be an array of environment variable names, got json value".to_string());
+        return Err(
+            "exposeEnv must be an array of environment variable names, got json value".to_string(),
+        );
     };
     let mut bad: Vec<String> = Vec::new();
     for item in list {

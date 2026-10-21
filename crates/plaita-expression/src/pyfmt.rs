@@ -289,7 +289,7 @@ fn render_spec(spec: &Spec, arg: &Value) -> Result<String, EvalError> {
             let exp_v: i32 = exp.parse().unwrap_or(0);
             let s = if exp_v < -4 || exp_v >= prec as i32 {
                 let t = pythonize_exp(&s, spec.conv == 'G');
-                
+
                 strip_frac_zeros(t, true)
             } else {
                 strip_frac_zeros(
