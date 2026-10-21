@@ -69,6 +69,16 @@ pub const KNOWN_UNSUPPORTED: &[(&str, &str)] = &[
         "provider-based child flow reference is not ported yet (use inline childFlow)",
     ),
     ("sleep", "sleep node is not part of the plaita dialect"),
+    ("trpc", "internal RPC node was removed from this engine"),
+    ("mdb", "internal database node was removed from this engine"),
+    (
+        "readmdb",
+        "internal database node was removed from this engine",
+    ),
+    (
+        "writemdb",
+        "internal database node was removed from this engine",
+    ),
     ("redis", "redis node is not ported by plaita-rs yet"),
     (
         "agentrun",
@@ -191,16 +201,17 @@ pub fn normalize_doc(doc: &mut Value, scope: Scope) -> Result<(), String> {
     }
     let flow_id = get_str(doc_obj, &["id"]).unwrap_or_default();
 
-    // global context: plaita global_context → engine context.global
-    for k in ["globalContext", "global_context"] {
-        if let Some(v) = doc_obj.remove(k) {
-            doc_obj
-                .entry("context")
-                .or_insert_with(|| obj([("global", Value::Null)]));
-            if let Some(ctx) = doc_obj.get_mut("context").and_then(|c| c.as_object_mut()) {
-                ctx.insert("global".into(), v);
+    // global context: plaita global_context → engine context.global。与 Go 对齐：
+    // 仅当 context 键不存在时才建 context.global（显式 context 声明胜出，
+    // 审计 F4）；两个拼写键都删净（审计 F8）。
+    {
+        let first = take(doc_obj, &["globalContext", "global_context"]);
+        doc_obj.remove("globalContext");
+        doc_obj.remove("global_context");
+        if let Some(v) = first {
+            if !doc_obj.contains_key("context") {
+                doc_obj.insert("context".into(), obj([("global", v)]));
             }
-            break;
         }
     }
 
@@ -261,7 +272,9 @@ pub fn normalize_doc(doc: &mut Value, scope: Scope) -> Result<(), String> {
         normalize_embedded(&flow_id, raw)?;
     }
 
-    validate::validate_doc(doc, scope).map_err(|e| e.to_string())
+    validate::validate_doc(doc, scope).map_err(|e| e.to_string())?;
+    validate::stash_unknown_node_fields(doc);
+    Ok(())
 }
 
 /// Recursively normalizes + validates the flow documents embedded in
@@ -578,6 +591,23 @@ fn translate_http(n: &mut Map<String, Value>) -> Result<(), String> {
             }
         }
     }
+    // plaita-go 携带 addressing/delegate（polaris 寻址/委托）在执行期使用；
+    // 本引擎不实现——依赖它的 flow 不许静默打向裸 url（审计 F5）
+    for k in ["addressing", "delegate"] {
+        if let Some(v) = n.get(k) {
+            let non_empty = match v {
+                Value::Null => false,
+                Value::Object(o) => !o.is_empty(),
+                Value::String(s) => !s.is_empty(),
+                _ => true,
+            };
+            if non_empty {
+                return Err(format!(
+                    "http {node_id:?}: {k} is not supported by this engine; remove it or run this flow on the plaita/go runtime"
+                ));
+            }
+        }
+    }
     // requestTimeout (seconds, float) folds into the node timeout when absent
     for k in ["requestTimeout", "request_timeout"] {
         if let Some(v) = n.remove(k) {
@@ -681,9 +711,11 @@ fn translate_code(n: &mut Map<String, Value>) -> Result<(), String> {
 }
 
 fn translate_end(n: &mut Map<String, Value>) -> Result<(), String> {
-    let rt = match n.get("resultType").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => {
+    let rt = match n.get("resultType") {
+        // Go 对 resultType 做 interface switch：非字符串非 null 是装载错误，
+        // 不能静默归一成 success（审计 F1）
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(Value::Null) | None => {
             let s = get_str(n, &["result_type"]).unwrap_or_default();
             if !s.is_empty() {
                 n.insert("resultType".into(), Value::String(s.clone()));
@@ -691,6 +723,9 @@ fn translate_end(n: &mut Map<String, Value>) -> Result<(), String> {
             } else {
                 String::new()
             }
+        }
+        Some(other) => {
+            return Err(format!("end resultType {other} is invalid (success|error)"));
         }
     };
     n.remove("result_type");
@@ -708,8 +743,10 @@ fn translate_end(n: &mut Map<String, Value>) -> Result<(), String> {
     }
     if let Some(e) = n.get_mut("error").and_then(|e| e.as_object_mut()) {
         if let Some(code) = e.get("code") {
+            // Go fmt.Sprint(nil) == "<nil>"
             let s = match code {
                 Value::String(s) => s.clone(),
+                Value::Null => "<nil>".to_string(),
                 other => other.to_string(),
             };
             e.insert("code".into(), Value::String(s));
@@ -726,19 +763,21 @@ pub fn normalize_property(p: &mut Value) -> Result<(), String> {
     };
     po.insert("strict".into(), Value::Bool(true));
     if !po.contains_key("dataType") {
-        if let Some(t) = po.remove("type") {
+        if let Some(t) = po.get("type").cloned() {
             po.insert("dataType".into(), t);
         }
     }
+    po.remove("type"); // Go 无条件删旧键，双拼写不残留
     fold_key(po, "title", "label");
     fold_key(po, "description", "desc");
     fold_key(po, "is_required", "isRequired");
     fold_key(po, "default_value", "defaultValue");
     if !po.contains_key("defaultValue") {
-        if let Some(d) = po.remove("default") {
+        if let Some(d) = po.get("default").cloned() {
             po.insert("defaultValue".into(), d);
         }
     }
+    po.remove("default");
     fold_key(po, "item_type", "itemType");
     if let Some(it) = po.get_mut("itemType") {
         if it.is_object() {
@@ -748,10 +787,11 @@ pub fn normalize_property(p: &mut Value) -> Result<(), String> {
     // nested object properties: engine key is properties; plaita internal
     // spelling is children; console exports use properties directly
     if !po.contains_key("properties") {
-        if let Some(c) = po.remove("children") {
+        if let Some(c) = po.get("children").cloned() {
             po.insert("properties".into(), c);
         }
     }
+    po.remove("children");
     // plaita Property.required: bool → isRequired; list form marks the named
     // children required
     match po.remove("required") {

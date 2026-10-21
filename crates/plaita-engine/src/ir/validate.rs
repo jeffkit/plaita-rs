@@ -167,9 +167,49 @@ pub fn validate_doc(doc: &Value, scope: Scope) -> Result<(), String> {
         check_node_refs(&flow_id, n, &ids)?;
         check_expression_functions(&flow_id, n)?;
         check_output_type_literal(&flow_id, n)?;
-        warn_unknown_node_fields(&flow_id, n);
     }
     Ok(())
+}
+
+/// warn_unknown_keys 的落盘半边：未知键报告（stderr）+ 写进节点 metadata 的
+/// `unknownFields`，使装载产物上可观测（Go validate.go:515-533 双通道，审计 F6）。
+/// 在 validate_doc 之后以可变访问执行。
+pub(crate) fn stash_unknown_node_fields(doc: &mut Value) {
+    let flow_id = doc
+        .as_object()
+        .and_then(|o| o.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let Some(nodes) = doc.get_mut("nodes").and_then(|x| x.as_array_mut()) else {
+        return;
+    };
+    for node in nodes.iter_mut() {
+        let Some(obj) = node.as_object_mut() else {
+            continue;
+        };
+        let node_type = get_str(obj, &["type"]).unwrap_or_default();
+        let known = node_known_keys(&node_type);
+        let mut unknown: Vec<String> = obj
+            .keys()
+            .filter(|k| !known.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        if unknown.is_empty() {
+            continue;
+        }
+        unknown.sort();
+        eprintln!(
+            "[ir] flow {flow_id:?} node {:?} ({node_type}): unknown config key(s) {unknown:?} will be ignored by the engine (possible typo?)",
+            node_label(obj)
+        );
+        let meta = obj
+            .entry("metadata")
+            .or_insert_with(|| Value::Object(Default::default()));
+        if let Some(m) = meta.as_object_mut() {
+            m.insert("unknownFields".into(), Value::String(unknown.join(",")));
+        }
+    }
 }
 
 // --- R5 / R6: expression reference scanning (ports _collect_refs) ---
@@ -182,7 +222,8 @@ fn find_node_refs(s: &str) -> Vec<(usize, usize, String)> {
     let b = s.as_bytes();
     let mut i = 0usize;
     while i + 6 <= b.len() {
-        if &s[i..i + 6] == "$NODE." {
+        // 字节比较（非 str 切片）：多字节字符中间不得 panic
+        if b[i..i + 6] == *b"$NODE." {
             let start = i + 6;
             let mut j = start;
             while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_' || b[j] == b'-') {
@@ -213,19 +254,27 @@ fn find_func_refs(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i + 3 <= b.len() {
-        if &s[i..i + 3] == "$F." {
+        if b[i..i + 3] == *b"$F." {
             let start = i + 3;
             let mut j = start;
             while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
                 j += 1;
             }
             if j > start {
-                let mut k = j;
-                while k < b.len() && (b[k] == b' ' || b[k] == b'\t') {
-                    k += 1;
-                }
-                if k < b.len() && b[k] == b'(' {
-                    out.push(s[start..j].to_string());
+                let preceded = i > 0
+                    && (b[i - 1] == b'_'
+                        || b[i - 1] == b'.'
+                        || b[i - 1] == b'$'
+                        || b[i - 1].is_ascii_alphanumeric());
+                if !preceded {
+                    let mut k = j;
+                    // Go regex \s*：换行也算（审计 F3）
+                    while k < b.len() && b[k].is_ascii_whitespace() {
+                        k += 1;
+                    }
+                    if k < b.len() && b[k] == b'(' {
+                        out.push(s[start..j].to_string());
+                    }
                 }
             }
             i = j.max(i + 3);
@@ -528,21 +577,6 @@ fn node_known_keys(node_type: &str) -> Vec<&'static str> {
         _ => &[],
     };
     BASE.iter().chain(kind.iter()).copied().collect()
-}
-
-fn warn_unknown_node_fields(flow_id: &str, n: &Map<String, Value>) {
-    let node_type = get_str(n, &["type"]).unwrap_or_default();
-    let known = node_known_keys(&node_type);
-    let mut unknown: Vec<&String> = n.keys().filter(|k| !known.contains(&k.as_str())).collect();
-    if unknown.is_empty() {
-        return;
-    }
-    unknown.sort();
-    let names: Vec<String> = unknown.iter().map(|s| s.to_string()).collect();
-    eprintln!(
-        "[ir] flow {flow_id:?} node {:?} ({node_type}): unknown config key(s) {names:?} will be ignored by the engine (possible typo?)",
-        node_label(n)
-    );
 }
 
 fn bfs(start: &str, edges: &HashMap<String, Vec<String>>) -> HashSet<String> {

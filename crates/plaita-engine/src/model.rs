@@ -51,14 +51,20 @@ fn de_u64_lenient<'de, D>(de: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
+    // Go json.Unmarshal 进 uint 的语义：整数照收，负数/小数/非数字报装载错，
+    // null 落零值（审计 F11——先前把非法值静默截为 0）
     let v = Value::deserialize(de)?;
-    Ok(match v {
-        Value::Number(n) => n
-            .as_u64()
-            .unwrap_or_else(|| n.as_f64().map(|f| f as u64).unwrap_or(0)),
-        Value::Null => 0,
-        _ => 0,
-    })
+    match v {
+        Value::Null => Ok(0),
+        Value::Number(n) => n.as_u64().ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "retryTimes must be a non-negative integer, got {n}"
+            ))
+        }),
+        other => Err(serde::de::Error::custom(format!(
+            "retryTimes must be a non-negative integer, got {other}"
+        ))),
+    }
 }
 
 /// A switch branch / parallel branch header (the `Branch` fields).
