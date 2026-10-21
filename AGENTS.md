@@ -58,6 +58,23 @@ tools/
 6. 表达式嵌套字符串**不二次求值**、无 `switch:eagerMode` 全局、无 harness/调试 generator ——
    与 Go 版一致的简化面。
 
+## 审计记录（2026-10-21，四路子智能体对抗审计）
+
+表达式对齐 / ir 契约 / 执行语义与并发 / 红队四路审计，全部 findings 双侧实测。已修复：
+- **P0** 表达式深嵌套调用栈溢出 abort（主线程 ~4500 层）→ parser 深度闸 256（Python 是 RecursionError；Go goroutine 栈可增长无此患，Rust 特有）；
+- **P0** `%Nf` 精度 >65535 使 std format! panic → 钳位；
+- **高** 节点退避写成 `1^attempt` 恒 1s → `2^n` cap 30s；
+- **高** 子流自有 timeout 不与父预算取 min（父 1s+子 1h 实测逃逸）→ `RuntimeCtx::child` 预算合成，deadline 贯穿 loop/parallel/child；
+- **中** code 节点 blanket deterministic 抹掉 Timeout 类致 timeoutHandler 失哑 → 保留 Timeout 类（1001 码保不重试）；
+- **中** 后台并行分支无 join 面被进程退出杀死 → `Host::track_background/join_background`，CLI 退出前 drain；
+- **P1** 模板 O(n²)（每个 `{%` 尝试全量克隆字符流，10000 段 51s）→ 借用 parser，**0.08s**；
+- **P1** `sort` 混排静默不排序 / `mul` 超限静默截断 → 均改具名错误（对齐 Python；Go 同点已提 #44/#45）；
+- **P1** `getListItem` dict 字符串键死分支 → 前置 dict 分支（Go 同点 #42）；
+- P2 群：`_`/dunder 属性闸覆盖非映射基底、`$NULL/$EMPTYSTRING` 后继路径、`\`+换行拒绝、`%g` 负指数、零转换符多余实参报错、sidecar 真进程组杀（process_group(0)+kill -9 -PID）；
+- ir 审计 6 单：end resultType 类型漏拒 / `$F` 扫描 lookbehind+`\s` / globalContext 显式 context 胜出 / http addressing·delegate fail-closed / unknownFields 落 metadata / retryTimes 严格化 + Property 双拼写残留清理 + trpc/mdb 族 hint + version 长度检查。
+
+**文档化残余（有意/存档，不算 bug）**：嵌套表达式字符串不二次求值（与 Go 一致；Python #104 Plan A 会递归求值——两引擎对「长得像表达式的数据文本」结果不同，**产品侧确认项**）；无全图环保护——switch 自环合法装载，防死循环=必配 flow timeout（与 Go 同型）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试每轮重建上下文（Go 复用上一轮 $NODE/$ERROR 残留——本引擎更干净，有意）。
+
 ## 对账发现已提报 plaita-go 的单（移植差分坐实，2026-10-21）
 
 - #40 `$F.index` 对 str 返回字节下标（Python 按字符）——本仓按字符实现；
@@ -65,7 +82,9 @@ tools/
 - #42 getListItem 对 dict 的字符串键分支不可达（pyIndexArg 先拒 str）——本仓 dict 走 KeyError 语义、
   同样先拒非整数下标（与 Python 一致的报错面，但 `$F.get` 是正规取键路径）；
 - #43 python sidecar 代码错误与 end FlowResultError 被判可重试（重试 6/4 次实证）——本仓两者均按
-  确定性分类（Deterministic，不烧重试预算）。
+  确定性分类（Deterministic，不烧重试预算）；
+- #44 `$F.sort` 混排静默输出（Python TypeError）——本仓比较错误上抛；
+- #45 `$F.mul` 序列重复超上限静默返回空串——本仓具名错误。
 
 ## 差分对账（改行为前必跑）
 
