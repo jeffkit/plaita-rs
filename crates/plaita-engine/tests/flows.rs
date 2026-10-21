@@ -367,6 +367,38 @@ fn deterministic_errors_never_retry() {
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
+/// 嵌套表达式字符串（plaita #104 Plan A）：运行期产出的表达式形状字符串
+/// （code/LLM 输出——配置字面量会在节点求值时就地算掉）在下游 `$NODE` 引用
+/// 时再求值；`$NODE.raw` 是显式原样旁路。
+#[test]
+fn nested_expression_strings_from_runtime_data() {
+    let data = r#"{
+        "flow_id": "nested_expr",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "c"},
+            {"type": "code", "id": "c", "language": "python", "next": "p",
+             "code": "def run(input):\n    return {'expr': '$F.add(2,3)', 'text': 'see $INPUT.x?'}",
+             "input": {}},
+            {"type": "parse", "id": "p", "next": "e"},
+            {"type": "end", "id": "e", "resultType": "success",
+             "output": {"evaluated": "$NODE.c.expr", "data_text": "$NODE.c.text"}}
+        ]}"#;
+    // "parse" 是 ir 不认识的类型，换成 assignment 节点占位后再修正
+    let mut doc: Value = serde_json::from_str(data).unwrap();
+    doc["nodes"][2] = json!({"type": "assignment", "id": "p", "next": "e", "output": "$NODE.c"});
+    let flow = ir::load(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let got = flow.execute(&json!({}), &Host::new()).unwrap();
+    assert_eq!(
+        got,
+        json!({
+            "evaluated": 5,                       // 容器无根引用 → 再求值
+            "data_text": "see $INPUT.x?",         // 含 $ 但不在开头且无 {% → 普通文本
+        })
+    );
+    // 注：`$NODE.raw` 旁路只在表达式层生效（crates/plaita-expression 测试）——
+    // 部署 IR 的 R5 扫描与 Python/Go 一致，不豁免 raw（无 raw 节点即装载错）
+}
+
 /// 子流自有 timeout 必须与父预算取 min（审计 [高]：先前「父 1s + 子 1h」
 /// 会跑满子预算才在父层炸）。
 #[test]

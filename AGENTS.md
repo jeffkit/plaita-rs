@@ -73,7 +73,18 @@ tools/
 - P2 群：`_`/dunder 属性闸覆盖非映射基底、`$NULL/$EMPTYSTRING` 后继路径、`\`+换行拒绝、`%g` 负指数、零转换符多余实参报错、sidecar 真进程组杀（process_group(0)+kill -9 -PID）；
 - ir 审计 6 单：end resultType 类型漏拒 / `$F` 扫描 lookbehind+`\s` / globalContext 显式 context 胜出 / http addressing·delegate fail-closed / unknownFields 落 metadata / retryTimes 严格化 + Property 双拼写残留清理 + trpc/mdb 族 hint + version 长度检查。
 
-**文档化残余（有意/存档，不算 bug）**：嵌套表达式字符串不二次求值（与 Go 一致；Python #104 Plan A 会递归求值——两引擎对「长得像表达式的数据文本」结果不同，**产品侧确认项**）；无全图环保护——switch 自环合法装载，防死循环=必配 flow timeout（与 Go 同型）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试每轮重建上下文（Go 复用上一轮 $NODE/$ERROR 残留——本引擎更干净，有意）。
+**文档化残余（有意/存档，不算 bug）**：无全图环保护——switch 自环合法装载，防死循环=必配 flow timeout（与 Go 同型）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试每轮重建上下文（Go 复用上一轮 $NODE/$ERROR 残留——本引擎更干净，有意）。
+
+## 嵌套表达式字符串已对齐（2026-10-21，jeffkit 拍板「Python 即契约」）
+
+JSON 配置里字符串是表达式唯一形态，故 plaita #104 Plan A 的**递归求值是意图语义**，不是 wart。本引擎已在表达式遍历层实现（`eval.rs` 的 `eval_nested_expression`）：
+
+- 映射字段的字符串值以 `$` 开头或含 `{%` → 以**持有它的容器**为作用域再求值；
+- 根闸（`_scan_root_refs` 同形）：剥引号字面量后，引用的内建根必须恰好是 `{INPUT,NODE,PARENT,GLOBAL,ENV,FLOW_ID}` 且以 `"$NAME"` 键存在于容器——否则是数据文本（LLM 输出/文件内容），原样返回；`$FLOW`→`$FLOW_ID` 别名、字段位（前趋 `.`）不算根；
+- index 段不递归；`$NODE.raw.<node>` 是显式原样旁路（含「真有节点叫 raw」碰撞规则）；
+- 求值 KeyError 带归因重抛，其余错误原样上行。
+
+注意两点边界：①**配置字面量在节点求值时就地算掉**（`{"out": "$F.add(2,3)"}` 写在节点 output 里，落进 $NODE 的已是 3）——递归求值面只吃**运行期产出的**字符串（code/LLM/外部数据）；②部署 IR 的 R5 扫描**不豁免 `raw`**（Python/Go/Rust 三方一致，无 raw 节点即装载错）——raw 是表达式层逃生口，不是部署语法。Go 侧缺同一特性，已提 plaita-go 单。
 
 ## 对账发现已提报 plaita-go 的单（移植差分坐实，2026-10-21）
 
