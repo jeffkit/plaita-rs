@@ -169,18 +169,13 @@ fn execute_end(
                 Some(e) => (e.code.clone(), e.message.clone()),
                 None => (String::new(), String::new()),
             };
+            // FlowResultError 的 code/message 随错误文本上行（CLI/宿主按
+            // FlowResultError 前缀解析）；不落 current——那会泄漏成表达式
+            // 可见的额外根，Go 版没有这个面
             Err(NodeError {
                 message: format!("FlowResultError: code={code}, message={message}"),
                 class: crate::error::ErrorClass::Deterministic,
                 code: crate::error::RUNTIME_ERROR_CODE,
-            })
-            .inspect_err(|_ne| {
-                // carry the flow-result payload for the engine to re-raise as
-                // FlowError::FlowResult (plaita FlowResultError contract)
-                rc.set_current(
-                    "__flow_result_error__",
-                    json!({"code": code, "message": message}),
-                );
             })
         }
         // success（含未知值的默认归一，对齐 Python setup_end）：求值并校验

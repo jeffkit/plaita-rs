@@ -153,17 +153,12 @@ impl RuntimeCtx {
         let mut ctx = RuntimeCtx::new();
         {
             let parent_inner = parent.map(|p| p.inner.read().expect("ctx lock"));
-            let grandparent_flow: Option<String>;
-            let grandparent_exec: Option<String>;
             let parent_env: Option<Value>;
             let parent_global: Option<Value>;
             if let Some(pi) = &parent_inner {
                 // the parent chain carries at most two levels (Go reads the
                 // grandparent through the seed's $PARENT link); the immediate
                 // parent wins
-                grandparent_flow = None;
-                grandparent_exec = None;
-                let _ = (grandparent_flow, grandparent_exec);
                 ctx.inner.write().unwrap().flow_id = pi.flow_id.clone();
                 ctx.inner.write().unwrap().execution_id = pi.execution_id.clone();
                 parent_env = Some(pi.env.clone());
