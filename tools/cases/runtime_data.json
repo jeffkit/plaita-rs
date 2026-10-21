@@ -1,0 +1,11 @@
+{
+  "flow_id": "runtime_data",
+  "nodes": [
+    {"type": "start", "id": "s", "next": "c"},
+    {"type": "code", "id": "c", "language": "python", "next": "e",
+     "code": "def run(input):\n    return {'expr': '$F.add(2,3)', 'text': 'see $INPUT.x?'}",
+     "input": {}},
+    {"type": "end", "id": "e", "resultType": "success",
+     "output": {"expr": "$NODE.c.expr", "text": "$NODE.c.text"}}
+  ]
+}

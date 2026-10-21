@@ -42,6 +42,8 @@ MANIFEST: list[tuple[str, Path, dict | None]] = [
     ("loop/condition-early-exit", CASES / "loop_condition.json", None),
     ("expr/mash", CASES / "expr_mash.json", {"first": "Ada", "last": "L", "n": 4}),
     ("error/continue-policy", CASES / "error_continue.json", {"v": "42"}),
+    # 契约用例（2026-10-21）：运行期字符串是数据——两侧都必须原样返回
+    ("runtime/string-is-data", CASES / "runtime_data.json", None),
 ]
 
 

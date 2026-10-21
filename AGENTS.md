@@ -75,17 +75,66 @@ tools/
 
 **文档化残余（有意/存档，不算 bug）**：无全图环保护——switch 自环合法装载，防死循环=必配 flow timeout（与 Go 同型）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试每轮重建上下文（Go 复用上一轮 $NODE/$ERROR 残留——本引擎更干净，有意）。
 
-## 嵌套表达式字符串已对齐（2026-10-21，jeffkit 拍板「Python 即契约」）
+## 运行期字符串契约：配置求值、运行期数据（2026-10-21，jeffkit 终裁）
 
-JSON 配置里字符串是表达式唯一形态，故 plaita #104 Plan A 的**递归求值是意图语义**，不是 wart。本引擎已在表达式遍历层实现（`eval.rs` 的 `eval_nested_expression`）：
+表达式只活在 **flow 配置**里（节点 output/input/condition 字段），引擎在节点执行时就地求值一次；**节点结果/输入里长得像表达式的字符串（`"$F.add(2,3)"`、`"{% ... %}"`）是数据**，`$NODE` 路径读原样返回，绝不再解析。两个层次严格区分：
 
-- 映射字段的字符串值以 `$` 开头或含 `{%` → 以**持有它的容器**为作用域再求值；
-- 根闸（`_scan_root_refs` 同形）：剥引号字面量后，引用的内建根必须恰好是 `{INPUT,NODE,PARENT,GLOBAL,ENV,FLOW_ID}` 且以 `"$NAME"` 键存在于容器——否则是数据文本（LLM 输出/文件内容），原样返回；`$FLOW`→`$FLOW_ID` 别名、字段位（前趋 `.`）不算根；
-- index 段不递归；`$NODE.raw.<node>` 是显式原样旁路（含「真有节点叫 raw」碰撞规则）；
-- 求值 KeyError 带归因重抛，其余错误原样上行。
+- **情况一（支持）**：`$NODE.a.b.c` 多层递进取值——一次求值、逐段走路径，与值层级无关；
+- **情况二（不做）**：值本身是表达式形状的字符串时对该字符串再求值（plaita #104 Plan A 的「嵌套表达式字符串」语义）。裁決依据：无不可替代场景（表达式工厂有 `$F.ifelse`/code 节点；动态模板物化与跨层引用传递被 #104 根闸实际封死）；plaita 自己的 #104/#130 就是朝「节点输出就是数据」方向修的半程；LLM 输出中 `$F...` 形状文本被静默执行是真实危害；且同值不同读法结果不同（`$NODE.x` 求值 vs `$F.get($NODE,'x')` 原样）是实现残留指纹。
 
-注意两点边界：①**配置字面量在节点求值时就地算掉**（`{"out": "$F.add(2,3)"}` 写在节点 output 里，落进 $NODE 的已是 3）——递归求值面只吃**运行期产出的**字符串（code/LLM/外部数据）；②部署 IR 的 R5 扫描**不豁免 `raw`**（Python/Go/Rust 三方一致，无 raw 节点即装载错）——raw 是表达式层逃生口，不是部署语法。Go 侧缺同一特性，已提 plaita-go 单。
+边界说明：①配置字面量在节点求值时就地算掉（三家一致）——所以「运行期不求值」⇔ Go/Rust 原行为，Python 是需要摘层的那个；②`$NODE.raw.<node>` 保留为兼容修饰符（本引擎路径读本就原样，含「真有节点叫 raw」碰撞规则，与 plaita-go 相同）；③R5 部署扫描不豁免 raw（三方一致）。Python 侧摘层已提单（jeffkit/plaita），plaita-go 对齐单 #46 已关闭（wontfix）。跨引擎契约用例已入差分对账（`runtime/string-is-data`，16/16）。
 
+## 对账发现已提报 plaita-go 的单（移植差分坐实，2026-10-21）
+
+- #40 `$F.index` 对 str 返回字节下标（Python 按字符）——本仓按字符实现；
+- #41 capitalize/title 首字符须用 titlecase 映射（'ß'→"Ss" 而非 "SS"）——本仓已按 titlecase 实现；
+- #42 getListItem 对 dict 的字符串键分支不可达（pyIndexArg 先拒 str）——本仓 dict 走 KeyError 语义、
+  同样先拒非整数下标（与 Python 一致的报错面，但 `$F.get` 是正规取键路径）；
+- #43 python sidecar 代码错误与 end FlowResultError 被判可重试（重试 6/4 次实证）——本仓两者均按
+  确定性分类（Deterministic，不烧重试预算）；
+- #44 `$F.sort` 混排静默输出（Python TypeError）——本仓比较错误上抛；
+- #45 `$F.mul` 序列重复超上限静默返回空串——本仓具名错误。
+
+## 差分对账（改行为前必跑）
+
+```bash
+# 参照侧：Go runner（依赖本机 plaita-go checkout；首次需
+#   cd tools/go-ref && GOPROXY=https://goproxy.cn,direct GOSUMDB=off go mod tidy && go build -o ../go-ref-bin .）
+python3 tools/diffcheck.py     # 15/15 用例与 plaita-go 双跑一致（2026-10-21 基线）
+```
+
+用例覆盖：plaita codeflow 编译器真产物（loop/parallel/child）、console 真实导出
+（assignment_flow）、if/switch/条件算子、loop 条件早退、表达式混搭、错误策略 continue、
+双端错误路径。**改 IR 契约、条件算子、节点语义前先跑它**；新增语义对齐时往 MANIFEST 加用例。
+
+## 测试与门禁
+
+```bash
+cargo test                                   # 全仓：单测 + golden + 端到端 flow 测试
+cargo test -p plaita-expression              # 29 单测 + 43 条 plaita golden（tests/golden.rs）
+cargo test -p plaita-engine --test flows     # 真实 testdata flow 端到端（断言与 Go 侧相同输出）
+cargo clippy --all-targets                   # 应保持零告警
+```
+
+- **golden 纪律**：`crates/plaita-expression/testdata/expression_golden.json` 是从 plaita
+  测试导出的逐字副本，禁止手改；Python 侧语义升级后用 plaita-go 的
+  `scripts/export_golden.py` 重新导出并同步到本仓。
+- **testdata 纪律**：`crates/plaita-engine/testdata/*.json` 来自 plaita-go `pkg/ir/testdata/`
+  （真实 console 导出 + codeflow 编译产物），同样禁止手改。
+
+## 环境备注（本机）
+
+- cargo 在 `~/.cargo/bin`（不在默认 PATH）。
+- 本机不可达 `static.crates.io`；本项目用 **rsproxy.cn** 镜像，配置在
+  `.cargo/config.toml`（**已 gitignore**，换机器需重建一份）。
+- Go 参照 runner 构建需 `GOPROXY=https://goproxy.cn,direct GOSUMDB=off`（同 plaita-go 的本机约定）。
+
+## 约定
+
+- 引擎逻辑活在 flow 图里（jeffkit 红线）；不做「宿主代码 + flow 皮」。
+- 所有降级（错误/超时策略、重试）必须可观测：事件回调 + `$ERROR` 记账，禁止静默。
+- IR 契约只认一种表示（plaita 部署 camelCase JSON）；schema 变更必须同步
+  normalize/validate 与 golden（吸取 plaita「DSL 三表示往返无不变量」的教训）。
 ## 对账发现已提报 plaita-go 的单（移植差分坐实，2026-10-21）
 
 - #40 `$F.index` 对 str 返回字节下标（Python 按字符）——本仓按字符实现；

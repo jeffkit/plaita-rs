@@ -16,15 +16,18 @@
 //! did-you-mean hint. Mutator calls (`$F.pop` & co.) refuse live context
 //! roots as their target (plaita#69 write protection).
 //!
-//! Nested expression strings (plaita #104 Plan A): a STRING field value that
-//! itself looks like an expression (starts with `$` or contains `{%`) IS an
-//! expression — in a JSON config a string is the only form an expression can
-//! take. Every mapping field read re-evaluates such strings with the holding
-//! container as the expression scope, but only when every builtin root the
-//! string references (`$INPUT/$NODE/$PARENT/$GLOBAL/$ENV/$FLOW_ID`) exists as
-//! a `"$NAME"` key in that container; anything else is data text (LLM
-//! output, file content) and passes through verbatim. Index segments never
-//! recurse; `$NODE.raw.<node>` is the explicit verbatim bypass (#130).
+//! Runtime values are DATA. A string stored in a node result / input that
+//! happens to look like an expression (`"$F.add(2,3)"`, `"{% ... %}"`) is
+//! returned verbatim by path reads — never re-parsed. Expressions live in the
+//! flow CONFIG only, where the engine evaluates them once at node execution;
+//! a code/LLM node that wants an evaluated value evaluates it itself.
+//! (Contract set 2026-10-21 after the plaita #104/#130 history review: the
+//! Python engine's "nested expression string" re-evaluation is a legacy
+//! artifact of its single evaluate() funnel — plaita#104 itself classifies it
+//! as a hazard — with no scenario that cannot be expressed otherwise.)
+//! `$NODE.raw.<node>` stays accepted as a compatibility modifier (verbatim is
+//! already the only semantics; the "node literally named raw" collision rule
+//! is kept, as in plaita-go).
 
 use serde_json::Value;
 
@@ -243,163 +246,36 @@ fn eval_var(root: &str, path: &[Segment], roots: &dyn Roots) -> Result<Value, Ev
 /// Since this engine never re-evaluates nested expression strings, stripping
 /// the modifier only needs the collision rule: a node literally named `raw`
 /// keeps being resolved as that node.
-fn strip_raw_modifier(root: &str, path: &[Segment], nodes: &Value) -> (Vec<Segment>, bool) {
+fn strip_raw_modifier(root: &str, path: &[Segment], nodes: &Value) -> Vec<Segment> {
     if root != "NODE" || path.len() < 2 {
-        return (path.to_vec(), false);
+        return path.to_vec();
     }
     let Segment::Field(first) = &path[0] else {
-        return (path.to_vec(), false);
+        return path.to_vec();
     };
     if first != "raw" {
-        return (path.to_vec(), false);
+        return path.to_vec();
     }
     let Segment::Field(second) = &path[1] else {
-        return (path.to_vec(), false);
+        return path.to_vec();
     };
     if second.is_empty() || second.chars().all(|c| c.is_ascii_digit()) {
-        return (path.to_vec(), false);
+        return path.to_vec();
     }
     if nodes
         .as_object()
         .map(|o| o.contains_key("raw"))
         .unwrap_or(false)
     {
-        return (path.to_vec(), false);
+        return path.to_vec();
     }
-    (path[1..].to_vec(), true)
-}
-
-/// 内建根闸集合（plaita `_ROOT_REF_NAMES`，刻意不含 ERROR/BRANCH/LAST_NODE
-/// 等——嵌套串引用了它们之外的任何 `$` 记号就是数据文本）。
-const NESTED_ROOT_NAMES: &[&str] = &["INPUT", "NODE", "PARENT", "GLOBAL", "ENV", "FLOW_ID"];
-
-/// plaita `_scan_root_refs`：剥掉引号字面量后，最大吞食 `$(name)` 记号；
-/// 字段位（前趋是 `.`）不算根；`$FLOW` 归一 `$FLOW_ID`。返回缺失的内建根名。
-fn nested_missing_roots(text: &str, container: &serde_json::Map<String, Value>) -> Vec<String> {
-    let stripped = mask_quoted_spans(text);
-    let chars: Vec<char> = stripped.chars().collect();
-    let mut missing: Vec<String> = Vec::new();
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] != '$' {
-            i += 1;
-            continue;
-        }
-        let start = i + 1;
-        let mut j = start;
-        while j < chars.len()
-            && (chars[j].is_ascii_alphanumeric()
-                || chars[j] == '_'
-                || chars[j] == '-'
-                || chars[j] == '$')
-        {
-            j += 1;
-        }
-        let name: String = chars[start..j].iter().collect();
-        i = j.max(i + 1);
-        if name.is_empty() {
-            continue; // 裸 $
-        }
-        if start > 0 && chars[start - 1] == '.' {
-            continue; // 字段位：$PARENT.$INPUT.name 的第二段是字面键
-        }
-        let resolved = if name == "FLOW" {
-            "FLOW_ID"
-        } else {
-            name.as_str()
-        };
-        if !NESTED_ROOT_NAMES.contains(&resolved) {
-            continue;
-        }
-        let key = format!("${resolved}");
-        if !container.contains_key(&key) && !missing.iter().any(|m| m == resolved) {
-            missing.push(resolved.to_string());
-        }
-    }
-    missing
-}
-
-/// 引号字面量遮罩（plaita `_QUOTED_SPAN_RE` 同形：`'..'`/`".."` 含反斜杠
-/// 转义）——字面量里的 `$INPUT` 是数据，不是根引用。
-fn mask_quoted_spans(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0usize;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\'' || c == '"' {
-            let quote = c;
-            out.push(' ');
-            i += 1;
-            while i < chars.len() {
-                if chars[i] == '\\' && i + 1 < chars.len() {
-                    i += 2;
-                    continue;
-                }
-                if chars[i] == quote {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
-/// 以持有字符串的容器为表达式作用域求值嵌套串：容器里 `$` 前缀的键成为
-/// 根（Python context["$INPUT"] 的键形态）。
-fn container_scope(container: &serde_json::Map<String, Value>) -> MapRoots<'static> {
-    let mut scope = MapRoots::new();
-    for (k, v) in container {
-        if let Some(name) = k.strip_prefix('$') {
-            scope.set(name.to_string(), v.clone());
-        }
-    }
-    scope
-}
-
-/// plaita #104 Plan A：映射字段的字符串值若长得像表达式（`$` 开头或含
-/// `{%`），以**持有它的容器**为作用域求值——前提是该串引用的每个内建根
-/// 都以 `"$NAME"` 键存在于容器；否则它是数据文本，原样返回。求值 KeyError
-/// 带归因重抛（Python 同型），其余错误原样上行。
-fn eval_nested_expression(
-    field: &str,
-    attr: &Value,
-    container: &serde_json::Map<String, Value>,
-) -> Result<Value, EvalError> {
-    let Some(text) = attr.as_str() else {
-        return Ok(attr.clone());
-    };
-    if !(text.starts_with('$') || text.contains("{%")) {
-        return Ok(attr.clone());
-    }
-    if !nested_missing_roots(text, container).is_empty() {
-        return Ok(attr.clone()); // 数据文本：原样返回，不抛不改写
-    }
-    let scope = container_scope(container);
-    eval_str(text, &scope).map_err(|e| {
-        if e.kind == ErrorKind::KeyError {
-            let preview: String = text.chars().take(117).collect();
-            EvalError::key_error(format!(
-                "while resolving field {field:?}: the value is a nested expression string {preview:?} \
-                 which is evaluated with its HOLDING CONTAINER as the context, and that container \
-                 lacks a root key it references. If this field is data text, read it via \
-                 $NODE.raw.<node> instead. Original error: {e}"
-            ))
-        } else {
-            e
-        }
-    })
+    path[1..].to_vec()
 }
 
 /// Traverses `path` under an existing root value with plaita's missing-key
 /// semantics (see the module docs).
 fn eval_var_path(root: &str, root_value: &Value, path: &[Segment]) -> Result<Value, EvalError> {
-    let (path, raw_mode) = strip_raw_modifier(root, path, root_value);
+    let path = strip_raw_modifier(root, path, root_value);
     let mut cur = root_value.clone();
     for seg in &path {
         match cur {
@@ -421,12 +297,7 @@ fn eval_var_path(root: &str, root_value: &Value, path: &[Segment]) -> Result<Val
                             "attribute access through '__'-prefixed path segment {name:?} is not allowed"
                         )));
                     }
-                    let attr = map.get(name).cloned().unwrap_or(Value::Null);
-                    cur = if !raw_mode {
-                        eval_nested_expression(name, &attr, &map)?
-                    } else {
-                        attr
-                    };
+                    cur = map.get(name).cloned().unwrap_or(Value::Null);
                 }
                 Segment::Index(i) => {
                     // JSON objects only carry string keys; a numeric index
@@ -788,72 +659,58 @@ mod tests {
     }
 
     #[test]
-    fn nested_expression_strings_re_evaluate() {
-        // plaita #104 Plan A：字段值是表达式形状的字符串 → 以持有容器为
-        // 作用域再求值（JSON 配置里字符串是表达式唯一形态）
+    fn runtime_strings_are_data_not_re_evaluated() {
+        // 契约（2026-10-21）：运行期值是数据——节点结果里长得像表达式的字符串
+        // 由路径读原样返回，绝不再解析；表达式只活在配置字段里（情况一的多层
+        // 取值 $NODE.a.b.c 不受影响）
         let mut r = MapRoots::new();
         r.set(
             "NODE",
             json!({
                 "n1": {"out": "$F.add(2,3)"},
                 "n2": {"out": "$INPUT.x"},
-                "n3": {"$INPUT": {"x": 9}, "out": "$INPUT.x"},
-                "n4": {"out": "{% $F.concat('a','b') %}"},
-                "n5": {"out": "$F.concat('$INPUT', '')"},
-                "n6": {"arr": ["$F.add(1,1)"]},
+                "n3": {"out": "{% $F.concat('a','b') %}"},
+                "n4": {"deep": {"er": {"c": 5}}},
+                "n5": {"arr": ["$F.add(1,1)"]},
+                "n6": {"out": "$F.nope(1)"},
             }),
         );
-        // 无根引用的函数串：再求值
-        assert_eq!(eval_str("$NODE.n1.out", &r).unwrap(), json!(5));
-        // 引用 $INPUT 但容器里没有 "$INPUT" 键 → 数据文本，原样返回
+        assert_eq!(eval_str("$NODE.n1.out", &r).unwrap(), json!("$F.add(2,3)"));
         assert_eq!(eval_str("$NODE.n2.out", &r).unwrap(), json!("$INPUT.x"));
-        // 容器带 "$INPUT" 键 → 以容器为作用域求值
-        assert_eq!(eval_str("$NODE.n3.out", &r).unwrap(), json!(9));
-        // 模板串同样递归
-        assert_eq!(eval_str("$NODE.n4.out", &r).unwrap(), json!("ab"));
-        // 引号字面量里的 $INPUT 是数据不是根引用（不触发 gate，也不拦截求值）
-        assert_eq!(eval_str("$NODE.n5.out", &r).unwrap(), json!("$INPUT"));
-        // index 段直接索引、不递归（plaita: index segments index directly）
         assert_eq!(
-            eval_str("$NODE.n6.arr.0", &r).unwrap(),
+            eval_str("$NODE.n3.out", &r).unwrap(),
+            json!("{% $F.concat('a','b') %}")
+        );
+        // 情况一：多层递进取值，一次求值
+        assert_eq!(eval_str("$NODE.n4.deep.er.c", &r).unwrap(), json!(5));
+        assert_eq!(
+            eval_str("$NODE.n5.arr.0", &r).unwrap(),
             json!("$F.add(1,1)")
+        );
+        // 数据文本永不触发解析——哪怕是个会报 NameError 的"表达式"
+        assert_eq!(eval_str("$NODE.n6.out", &r).unwrap(), json!("$F.nope(1)"));
+        // 读法不影响语义：路径读与函数读结果一致（Python 侧两者不一致是
+        // 实现残留的指纹，本引擎没有这条分裂）
+        assert_eq!(
+            eval_str("$F.get($NODE.n1, 'out')", &r).unwrap(),
+            json!("$F.add(2,3)")
         );
     }
 
     #[test]
-    fn nested_raw_accessor_and_collision() {
-        // raw 旁路：整条路径跳过递归求值（#130）
+    fn raw_modifier_compat_and_collision() {
         let mut r = MapRoots::new();
         r.set("NODE", json!({"n": {"out": "$F.add(2,3)"}}));
-        assert_eq!(eval_str("$NODE.n.out", &r).unwrap(), json!(5));
+        // raw 修饰符被接受并剥除；语义与裸路径读一致（都是原样）
         assert_eq!(
             eval_str("$NODE.raw.n.out", &r).unwrap(),
             json!("$F.add(2,3)")
         );
+        assert_eq!(eval_str("$NODE.n.out", &r).unwrap(), json!("$F.add(2,3)"));
         // 碰撞规则：真有节点叫 raw → raw 按普通节点解析
         let mut r2 = MapRoots::new();
-        r2.set(
-            "NODE",
-            json!({"raw": {"n": {"out": 42}}, "n": {"out": "$F.add(2,3)"}}),
-        );
+        r2.set("NODE", json!({"raw": {"n": {"out": 42}}}));
         assert_eq!(eval_str("$NODE.raw.n.out", &r2).unwrap(), json!(42));
-    }
-
-    #[test]
-    fn nested_keyerror_attributed_to_holding_container() {
-        let mut r = MapRoots::new();
-        r.set(
-            "NODE",
-            json!({"n": {"$INPUT": {}, "out": "$F.getListItem($INPUT, 'nope')"}}),
-        );
-        let err = eval_str("$NODE.n.out", &r).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::KeyError);
-        assert!(err.message.contains("nested expression"), "{err}");
-        // 求值期非 KeyError 错误（NameError）原样上行，不带归因改写
-        let mut r2 = MapRoots::new();
-        r2.set("NODE", json!({"n": {"out": "$F.nope(1)"}}));
-        let err = eval_str("$NODE.n.out", &r2).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::NameError);
     }
 
     #[test]
