@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/plaita-expression",
+    "crates/plaita-engine",
+    "crates/plaita-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/jeffkit/plaita-rs"
+rust-version = "1.80"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+# preserve_order keeps dict insertion order (Python semantics the Go engine
+# had to document as a divergence); arbitrary_precision is NOT used so numbers
+# stay in the i64/u64/f64 domain plaita's JSON values live in.
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+ureq = { version = "2", features = ["json"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,450 @@
+[
+  {
+    "id": "GoldenPlainAndPassthrough.test_plain_string",
+    "expr": "hello",
+    "context": {},
+    "expected": "hello"
+  },
+  {
+    "id": "GoldenPlainAndPassthrough.test_bare_braces_passthrough",
+    "expr": "{user.name}",
+    "context": {
+      "user": {
+        "name": "tom"
+      }
+    },
+    "expected": "{user.name}",
+    "note": "\"{...}\" without {% ... %} is NOT interpolation"
+  },
+  {
+    "id": "GoldenPlainAndPassthrough.test_int_passthrough",
+    "expr": 42,
+    "context": {},
+    "expected": 42,
+    "note": "non-string passthrough: expr is the raw value, not an expression string"
+  },
+  {
+    "id": "GoldenPlainAndPassthrough.test_none_passthrough",
+    "expr": null,
+    "context": {},
+    "expected": null,
+    "note": "non-string passthrough: expr is the raw value, not an expression string"
+  },
+  {
+    "id": "GoldenPlainAndPassthrough.test_bool_passthrough",
+    "expr": true,
+    "context": {},
+    "expected": true,
+    "note": "assertIs (identity); non-string passthrough: expr is the raw value, not an expression string"
+  },
+  {
+    "id": "GoldenPlainAndPassthrough.test_list_recursion",
+    "expr": [
+      "$INPUT",
+      "static"
+    ],
+    "context": {
+      "$INPUT": 42
+    },
+    "expected": [
+      42,
+      "static"
+    ],
+    "note": "non-string passthrough: expr is the raw value, not an expression string"
+  },
+  {
+    "id": "GoldenPlainAndPassthrough.test_dict_recursion",
+    "expr": {
+      "greeting": "$INPUT.name"
+    },
+    "context": {
+      "$INPUT": {
+        "name": "Alice"
+      }
+    },
+    "expected": {
+      "greeting": "Alice"
+    },
+    "note": "non-string passthrough: expr is the raw value, not an expression string"
+  },
+  {
+    "id": "GoldenPlainAndPassthrough.test_nested_dict_recursion",
+    "expr": {
+      "outer": {
+        "inner": "$INPUT.a.b"
+      }
+    },
+    "context": {
+      "$INPUT": {
+        "a": {
+          "b": 1
+        }
+      }
+    },
+    "expected": {
+      "outer": {
+        "inner": 1
+      }
+    },
+    "note": "non-string passthrough: expr is the raw value, not an expression string"
+  },
+  {
+    "id": "GoldenVariablePaths.test_root_variable",
+    "expr": "$INPUT",
+    "context": {
+      "$INPUT": "hello"
+    },
+    "expected": "hello"
+  },
+  {
+    "id": "GoldenVariablePaths.test_root_bracket_index",
+    "expr": "$INPUT[0]",
+    "context": {
+      "$INPUT": [
+        "hello"
+      ]
+    },
+    "expected": "hello"
+  },
+  {
+    "id": "GoldenVariablePaths.test_root_dot_digit_index",
+    "expr": "$INPUT.0",
+    "context": {
+      "$INPUT": [
+        "hello"
+      ]
+    },
+    "expected": "hello"
+  },
+  {
+    "id": "GoldenVariablePaths.test_root_bracket_then_field",
+    "expr": "$INPUT[0].name",
+    "context": {
+      "$INPUT": [
+        {
+          "name": "hello"
+        }
+      ]
+    },
+    "expected": "hello"
+  },
+  {
+    "id": "GoldenVariablePaths.test_root_negative_bracket_then_field",
+    "expr": "$INPUT[-1].name",
+    "context": {
+      "$INPUT": [
+        {
+          "name": "hello"
+        }
+      ]
+    },
+    "expected": "hello"
+  },
+  {
+    "id": "GoldenVariablePaths.test_field_then_bracket",
+    "expr": "$INPUT.names[0]",
+    "context": {
+      "$INPUT": {
+        "names": [
+          "hello"
+        ]
+      }
+    },
+    "expected": "hello"
+  },
+  {
+    "id": "GoldenVariablePaths.test_root_dot_digit_then_field",
+    "expr": "$INPUT.0.name",
+    "context": {
+      "$INPUT": [
+        {
+          "name": "hello"
+        }
+      ]
+    },
+    "expected": "hello"
+  },
+  {
+    "id": "GoldenVariablePaths.test_field_then_dot_digit",
+    "expr": "$INPUT.users.0",
+    "context": {
+      "$INPUT": {
+        "users": [
+          {
+            "name": "hello"
+          }
+        ]
+      }
+    },
+    "expected": {
+      "name": "hello"
+    }
+  },
+  {
+    "id": "GoldenVariablePaths.test_deep_dotted_path",
+    "expr": "$INPUT.a.b.c",
+    "context": {
+      "$INPUT": {
+        "a": {
+          "b": {
+            "c": "deep"
+          }
+        }
+      }
+    },
+    "expected": "deep"
+  },
+  {
+    "id": "GoldenVariablePaths.test_missing_nested_returns_none",
+    "expr": "$INPUT.missing",
+    "context": {
+      "$INPUT": {}
+    },
+    "expected": null
+  },
+  {
+    "id": "GoldenVariablePaths.test_node_path_multiline",
+    "expr": "img: ![]({%$NODE.step1.data.0.url%})",
+    "context": {
+      "$NODE": {
+        "step1": {
+          "data": [
+            {
+              "url": "http://example.com"
+            }
+          ]
+        }
+      }
+    },
+    "expected": "img: ![](http://example.com)"
+  },
+  {
+    "id": "GoldenInterpolation.test_basic_interpolation",
+    "expr": "my name is {%$INPUT[0].name%}",
+    "context": {
+      "$INPUT": [
+        {
+          "name": "hello"
+        }
+      ]
+    },
+    "expected": "my name is hello"
+  },
+  {
+    "id": "GoldenInterpolation.test_interpolation_with_spaces",
+    "expr": "v: {% $INPUT %}",
+    "context": {
+      "$INPUT": 3
+    },
+    "expected": "v: 3"
+  },
+  {
+    "id": "GoldenInterpolation.test_wrong_prefix_passthrough",
+    "expr": "x {%@INPUT[0].name%} y",
+    "context": {
+      "$INPUT": [
+        {
+          "name": "hello"
+        }
+      ]
+    },
+    "expected": "x {%@INPUT[0].name%} y"
+  },
+  {
+    "id": "GoldenInterpolation.test_no_prefix_inside_braces_passthrough",
+    "expr": "hi {%world%}",
+    "context": {
+      "world": "x"
+    },
+    "expected": "hi {%world%}",
+    "note": "{%world%} does not start with $ -> not interpolated"
+  },
+  {
+    "id": "GoldenInterpolation.test_function_inside_interpolation#1",
+    "expr": "let see: {%$F.add(3, $INPUT)%}",
+    "context": {
+      "$INPUT": 3
+    },
+    "expected": "let see: 6"
+  },
+  {
+    "id": "GoldenInterpolation.test_function_inside_interpolation#2",
+    "expr": "let see: {% $F.add(3, $INPUT) %}",
+    "context": {
+      "$INPUT": 3
+    },
+    "expected": "let see: 6"
+  },
+  {
+    "id": "GoldenInterpolation.test_multi_interpolation",
+    "expr": "{%$A%} and {%$B%}",
+    "context": {
+      "$A": "x",
+      "$B": "y"
+    },
+    "expected": "x and y"
+  },
+  {
+    "id": "GoldenInterpolation.test_unclosed_brace_passthrough#1",
+    "expr": "a {% b",
+    "context": {},
+    "expected": "a {% b"
+  },
+  {
+    "id": "GoldenInterpolation.test_unclosed_brace_passthrough#2",
+    "expr": "a {% $INPUT %} b {%",
+    "context": {
+      "$INPUT": "x"
+    },
+    "expected": "a x b {%"
+  },
+  {
+    "id": "GoldenFunctionCalls.test_flat_add",
+    "expr": "$F.add(1, 2)",
+    "context": {},
+    "expected": 3
+  },
+  {
+    "id": "GoldenFunctionCalls.test_flat_add_spaces",
+    "expr": "$F.add( 1, 2 )",
+    "context": {},
+    "expected": 3
+  },
+  {
+    "id": "GoldenFunctionCalls.test_nested_function",
+    "expr": "$F.add($F.add(1, 2), 3)",
+    "context": {},
+    "expected": 6
+  },
+  {
+    "id": "GoldenFunctionCalls.test_nested_function_deep",
+    "expr": "$F.add($F.mul(2, 3), 4)",
+    "context": {},
+    "expected": 10
+  },
+  {
+    "id": "GoldenFunctionCalls.test_nested_function_with_variable",
+    "expr": "$F.add($F.add(1, 2), $INPUT.value)",
+    "context": {
+      "$INPUT": {
+        "value": 3
+      }
+    },
+    "expected": 6
+  },
+  {
+    "id": "GoldenFunctionCalls.test_function_with_root_variable_arg",
+    "expr": "$F.add(3, $INPUT)",
+    "context": {
+      "$INPUT": 3
+    },
+    "expected": 6
+  },
+  {
+    "id": "GoldenFunctionCalls.test_function_with_string_args",
+    "expr": "$F.concat(\"1\", \"2\", \"3\", \"4\")",
+    "context": {},
+    "expected": "1234"
+  },
+  {
+    "id": "GoldenFunctionCalls.test_function_with_deep_variable_arg",
+    "expr": "$F.sub($INPUT.test.value, 2)",
+    "context": {
+      "$INPUT": {
+        "test": {
+          "value": 3
+        }
+      }
+    },
+    "expected": 1
+  },
+  {
+    "id": "GoldenFunctionCalls.test_function_default_arg",
+    "expr": "$F.getDictValue($INPUT.test, 'value1', 2)",
+    "context": {
+      "$INPUT": {
+        "test": {
+          "value": 3
+        }
+      }
+    },
+    "expected": 2
+  },
+  {
+    "id": "GoldenFunctionCalls.test_function_no_default",
+    "expr": "$F.getDictValue($INPUT.test, 'value')",
+    "context": {
+      "$INPUT": {
+        "test": {
+          "value": 3
+        }
+      }
+    },
+    "expected": 3
+  },
+  {
+    "id": "GoldenFunctionCalls.test_function_trailing_comma_default",
+    "expr": "$F.getDictValue($INPUT.test, 'value',)",
+    "context": {
+      "$INPUT": {
+        "test": {
+          "value": 3
+        }
+      }
+    },
+    "expected": 3
+  },
+  {
+    "id": "GoldenFunctionCalls.test_function_variadic_with_variable",
+    "expr": "$F.concat($INPUT.test.value, '2', '3')",
+    "context": {
+      "$INPUT": {
+        "test": {
+          "value": "1"
+        }
+      }
+    },
+    "expected": "123"
+  },
+  {
+    "id": "GoldenFunctionCalls.test_function_or_variadic",
+    "expr": "$F.or($INPUT.test.value, 0, '3')",
+    "context": {
+      "$INPUT": {
+        "test": {
+          "value": ""
+        }
+      }
+    },
+    "expected": "3"
+  },
+  {
+    "id": "GoldenFunctionCalls.test_unknown_function_returns_undefined",
+    "expr": "$F.does_not_exist(1, 2)",
+    "context": {},
+    "expected": {
+      "$error": "NameError"
+    },
+    "note": "默认注册表未命中 → NameError 带 did-you-mean（LLM 作者模拟 P0-3： 返回 'undefined' 字符串会让错误值静默流入下游）；scoped registry 仍返回 'undefined'（既有契约）。; expect native NameError (test also asserts the message names the function)"
+  },
+  {
+    "id": "GoldenFunctionCalls.test_parse_function_non_function_returns_input",
+    "expr": "$INPUT.value",
+    "context": {},
+    "expected": "$INPUT.value",
+    "note": "parse_function only handles $F.* ; a bare variable path is returned as-is; API: parse_function (the $F.* call-parse entry; returns the input unchanged when the expression is not a $F.* call)"
+  },
+  {
+    "id": "GoldenFunctionCalls.test_parse_function_nested",
+    "expr": "$F.add($F.add(1, 2), $F.mul(3, 4))",
+    "context": {},
+    "expected": 15,
+    "note": "API: parse_function (the $F.* call-parse entry; returns the input unchanged when the expression is not a $F.* call)"
+  },
+  {
+    "id": "GoldenScopedRegistry.test_default_registry_builtin",
+    "expr": "$F.upper(\"hello\")",
+    "context": {},
+    "expected": "HELLO"
+  }
+]

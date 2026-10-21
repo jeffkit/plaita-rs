@@ -1,0 +1,18 @@
+[package]
+name = "plaita-cli"
+description = "plaita-rs command line: load, validate and run plaita deployment flows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "plaita-rs"
+path = "src/main.rs"
+
+[dependencies]
+plaita-engine = { path = "../plaita-engine" }
+plaita-expression = { path = "../plaita-expression" }
+serde_json = { workspace = true }
+clap = { workspace = true }

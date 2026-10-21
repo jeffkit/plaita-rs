@@ -1,0 +1,23 @@
+[package]
+name = "plaita-engine"
+description = "plaita flow engine: deployment-IR loader, runtime context and builtin nodes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["http"]
+# http pulls in a blocking HTTP client for the `http` node; disable it to
+# build a pure-computation engine (the node then fails closed at load).
+http = ["dep:ureq"]
+
+[dependencies]
+plaita-expression = { path = "../plaita-expression" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+ureq = { workspace = true, optional = true }

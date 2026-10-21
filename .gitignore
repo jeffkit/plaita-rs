@@ -1,0 +1,4 @@
+/target/
+# machine-local registry mirror override, see AGENTS.md
+/.cargo/config.toml
+.DS_Store
