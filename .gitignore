@@ -2,5 +2,5 @@
 # machine-local registry mirror override, see AGENTS.md
 /.cargo/config.toml
 # Go differential reference runner binary (built locally)
-/tools/go-ref-bin/
+/tools/go-ref-bin
 .DS_Store
