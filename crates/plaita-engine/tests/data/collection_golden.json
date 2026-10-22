@@ -1,0 +1,2520 @@
+[
+ {
+  "expected": {
+   "output": 6
+  },
+  "flow": {
+   "flow_id": "loop_basic",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "lp",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.mul($INPUT.item, 2)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "lp",
+     "next": "o",
+     "type": "loop"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.lp",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "loop_basic"
+ },
+ {
+  "expected": {
+   "output": null
+  },
+  "flow": {
+   "flow_id": "loop_empty_null",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "lp",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.mul($INPUT.item, 2)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "lp",
+     "next": "o",
+     "type": "loop"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.lp",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": null
+  },
+  "name": "loop_empty_null"
+ },
+ {
+  "expected": {
+   "output": null
+  },
+  "flow": {
+   "flow_id": "loop_empty_literal",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "lp",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.mul($INPUT.item, 2)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": [],
+     "id": "lp",
+     "next": "o",
+     "type": "loop"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.lp",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "loop_empty_literal"
+ },
+ {
+  "expected": {
+   "output": 4
+  },
+  "flow": {
+   "flow_id": "loop_condition_break",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "lp",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.mul($INPUT.item, 2)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "condition": {
+      "field": "$LOOP-RESULT",
+      "operator": "eq",
+      "value": 2
+     },
+     "id": "lp",
+     "next": "o",
+     "type": "loop"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.lp",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "loop_condition_break"
+ },
+ {
+  "expected": {
+   "output": 3
+  },
+  "flow": {
+   "flow_id": "loop_string_collection",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "lp",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "[1, 2, 3]",
+     "id": "lp",
+     "next": "o",
+     "type": "loop"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.lp",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "loop_string_collection"
+ },
+ {
+  "expected": {
+   "output": 6
+  },
+  "flow": {
+   "flow_id": "loop_nested",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "lp",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "inner",
+        "type": "start"
+       },
+       {
+        "childFlow": {
+         "inputType": {
+          "dataType": "object"
+         },
+         "nodes": [
+          {
+           "id": "c_s",
+           "next": "c_e",
+           "type": "start"
+          },
+          {
+           "id": "c_e",
+           "output": "$F.mul($INPUT.item, 2)",
+           "resultType": "success",
+           "type": "end"
+          }
+         ],
+         "runtime": "python"
+        },
+        "collection": "$INPUT.item",
+        "id": "inner",
+        "next": "c_e",
+        "type": "loop"
+       },
+       {
+        "id": "c_e",
+        "output": "$NODE.inner",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "lp",
+     "next": "o",
+     "type": "loop"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.lp",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    [
+     1,
+     2
+    ],
+    [
+     3
+    ]
+   ]
+  },
+  "name": "loop_nested"
+ },
+ {
+  "expected": {
+   "error": "NodeExecutionError: \u6267\u884c\u8282\u70b9lp\u51fa\u9519\u4e86: ErrorResultException: boom"
+  },
+  "flow": {
+   "flow_id": "loop_error_propagation",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "lp",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_if",
+        "type": "start"
+       },
+       {
+        "condition": {
+         "field": "$INPUT.item",
+         "operator": "eq",
+         "value": 2
+        },
+        "else_next": "c_ok",
+        "id": "c_if",
+        "next": "c_err",
+        "type": "if"
+       },
+       {
+        "error": {
+         "code": "500",
+         "message": "boom"
+        },
+        "id": "c_err",
+        "resultType": "error",
+        "type": "end"
+       },
+       {
+        "id": "c_ok",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "lp",
+     "next": "o",
+     "type": "loop"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.lp",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "loop_error_propagation"
+ },
+ {
+  "expected": {
+   "output": [
+    2,
+    4,
+    6
+   ]
+  },
+  "flow": {
+   "flow_id": "map_basic",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.mul($INPUT.item, 2)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "m",
+     "next": "o",
+     "type": "map"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "map_basic"
+ },
+ {
+  "expected": {
+   "output": []
+  },
+  "flow": {
+   "flow_id": "map_empty",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.mul($INPUT.item, 2)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "m",
+     "next": "o",
+     "type": "map"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": null
+  },
+  "name": "map_empty"
+ },
+ {
+  "expected": {
+   "output": [
+    1,
+    2,
+    3
+   ]
+  },
+  "flow": {
+   "flow_id": "map_objects",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.item.n",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "m",
+     "next": "o",
+     "type": "map"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    {
+     "n": 1
+    },
+    {
+     "n": 2
+    },
+    {
+     "n": 3
+    }
+   ]
+  },
+  "name": "map_objects"
+ },
+ {
+  "expected": {
+   "output": [
+    2,
+    4,
+    6
+   ]
+  },
+  "flow": {
+   "flow_id": "map_concurrent",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.mul($INPUT.item, 2)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "concurrent": true,
+     "id": "m",
+     "maxConcurrent": 2,
+     "next": "o",
+     "type": "map"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "map_concurrent"
+ },
+ {
+  "expected": {
+   "output": [
+    6,
+    30
+   ]
+  },
+  "flow": {
+   "flow_id": "map_nested_reduce",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "rd",
+        "type": "start"
+       },
+       {
+        "childFlow": {
+         "inputType": {
+          "dataType": "array"
+         },
+         "nodes": [
+          {
+           "id": "c_s",
+           "next": "c_e",
+           "type": "start"
+          },
+          {
+           "id": "c_e",
+           "output": "$F.add($INPUT[0], $INPUT[1])",
+           "resultType": "success",
+           "type": "end"
+          }
+         ],
+         "runtime": "python"
+        },
+        "collection": "$INPUT.item",
+        "id": "rd",
+        "next": "c_e",
+        "type": "reduce"
+       },
+       {
+        "id": "c_e",
+        "output": "$NODE.rd",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "m",
+     "next": "o",
+     "type": "map"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    [
+     1,
+     2,
+     3
+    ],
+    [
+     10,
+     20
+    ]
+   ]
+  },
+  "name": "map_nested_reduce"
+ },
+ {
+  "expected": {
+   "error": "NodeExecutionError: \u6267\u884c\u8282\u70b9m\u51fa\u9519\u4e86: ErrorResultException: boom"
+  },
+  "flow": {
+   "flow_id": "map_error_propagation",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_if",
+        "type": "start"
+       },
+       {
+        "condition": {
+         "field": "$INPUT.item",
+         "operator": "eq",
+         "value": 2
+        },
+        "else_next": "c_ok",
+        "id": "c_if",
+        "next": "c_err",
+        "type": "if"
+       },
+       {
+        "error": {
+         "code": "500",
+         "message": "boom"
+        },
+        "id": "c_err",
+        "resultType": "error",
+        "type": "end"
+       },
+       {
+        "id": "c_ok",
+        "output": "$F.mul($INPUT.item, 2)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "m",
+     "next": "o",
+     "type": "map"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "map_error_propagation"
+ },
+ {
+  "expected": {
+   "output": [
+    "apple",
+    "fig",
+    "banana"
+   ]
+  },
+  "flow": {
+   "flow_id": "filter_truthiness_strings",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "filter"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    "apple",
+    "",
+    "fig",
+    "banana"
+   ]
+  },
+  "name": "filter_truthiness_strings"
+ },
+ {
+  "expected": {
+   "output": []
+  },
+  "flow": {
+   "flow_id": "filter_empty",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "filter"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": null
+  },
+  "name": "filter_empty"
+ },
+ {
+  "expected": {
+   "output": [
+    [
+     1
+    ],
+    [
+     2,
+     3
+    ]
+   ]
+  },
+  "flow": {
+   "flow_id": "filter_lists_truthiness",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "filter"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    [
+     1
+    ],
+    [],
+    [
+     2,
+     3
+    ],
+    []
+   ]
+  },
+  "name": "filter_lists_truthiness"
+ },
+ {
+  "expected": {
+   "output": [
+    {
+     "a": 1
+    },
+    {
+     "b": 0
+    }
+   ]
+  },
+  "flow": {
+   "flow_id": "filter_dicts_truthiness",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "filter"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    {},
+    {
+     "a": 1
+    },
+    {
+     "b": 0
+    }
+   ]
+  },
+  "name": "filter_dicts_truthiness"
+ },
+ {
+  "expected": {
+   "error": "NodeExecutionError: \u6267\u884c\u8282\u70b9f\u51fa\u9519\u4e86: ErrorResultException: boom"
+  },
+  "flow": {
+   "flow_id": "filter_error_propagation",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_if",
+        "type": "start"
+       },
+       {
+        "condition": {
+         "field": "$INPUT.index",
+         "operator": "eq",
+         "value": 1
+        },
+        "else_next": "c_ok",
+        "id": "c_if",
+        "next": "c_err",
+        "type": "if"
+       },
+       {
+        "error": {
+         "code": "500",
+         "message": "boom"
+        },
+        "id": "c_err",
+        "resultType": "error",
+        "type": "end"
+       },
+       {
+        "id": "c_ok",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "filter"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "filter_error_propagation"
+ },
+ {
+  "expected": {
+   "output": {
+    "tag": "b"
+   }
+  },
+  "flow": {
+   "flow_id": "find_dicts",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_if",
+        "type": "start"
+       },
+       {
+        "condition": {
+         "field": "$INPUT.item.tag",
+         "operator": "eq",
+         "value": "b"
+        },
+        "else_next": "c_f",
+        "id": "c_if",
+        "next": "c_t",
+        "type": "if"
+       },
+       {
+        "id": "c_t",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       },
+       {
+        "id": "c_f",
+        "output": "",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "find"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    {
+     "tag": "a"
+    },
+    {
+     "tag": "b"
+    },
+    {
+     "tag": "b"
+    }
+   ]
+  },
+  "name": "find_dicts"
+ },
+ {
+  "expected": {
+   "output": null
+  },
+  "flow": {
+   "flow_id": "find_not_found",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "find"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "find_not_found"
+ },
+ {
+  "expected": {
+   "output": null
+  },
+  "flow": {
+   "flow_id": "find_empty",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "find"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": null
+  },
+  "name": "find_empty"
+ },
+ {
+  "expected": {
+   "output": 2
+  },
+  "flow": {
+   "flow_id": "find_shortcircuit",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_if",
+        "type": "start"
+       },
+       {
+        "condition": {
+         "field": "$INPUT.item",
+         "operator": "eq",
+         "value": "boom"
+        },
+        "else_next": "c_ok",
+        "id": "c_if",
+        "next": "c_err",
+        "type": "if"
+       },
+       {
+        "error": {
+         "code": "500",
+         "message": "boom"
+        },
+        "id": "c_err",
+        "resultType": "error",
+        "type": "end"
+       },
+       {
+        "id": "c_ok",
+        "output": "$INPUT.item",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "find"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    0,
+    2,
+    "boom",
+    4
+   ]
+  },
+  "name": "find_shortcircuit"
+ },
+ {
+  "expected": {
+   "output": "b"
+  },
+  "flow": {
+   "flow_id": "find_returns_element_not_index",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "f",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.index",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "f",
+     "next": "o",
+     "type": "find"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.f",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    "a",
+    "b"
+   ]
+  },
+  "name": "find_returns_element_not_index"
+ },
+ {
+  "expected": {
+   "output": 6
+  },
+  "flow": {
+   "flow_id": "reduce_object_sum_no_initial",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.add($INPUT.first, $INPUT.second)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "r",
+     "next": "o",
+     "type": "reduce"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "reduce_object_sum_no_initial"
+ },
+ {
+  "expected": {
+   "output": 6
+  },
+  "flow": {
+   "flow_id": "reduce_array_sum_no_initial",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "array"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.add($INPUT[0], $INPUT[1])",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "r",
+     "next": "o",
+     "type": "reduce"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "reduce_array_sum_no_initial"
+ },
+ {
+  "expected": {
+   "output": 106
+  },
+  "flow": {
+   "flow_id": "reduce_initial_literal",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.add($INPUT.first, $INPUT.second)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "r",
+     "initial": 100,
+     "next": "o",
+     "type": "reduce"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": "reduce_initial_literal"
+ },
+ {
+  "expected": {
+   "output": 8
+  },
+  "flow": {
+   "flow_id": "reduce_initial_expression",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.add($INPUT.first, $INPUT.second)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "r",
+     "initial": "$INPUT.seed",
+     "next": "o",
+     "type": "reduce"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    1,
+    2
+   ],
+   "seed": 5
+  },
+  "name": "reduce_initial_expression"
+ },
+ {
+  "expected": {
+   "error": "NodeExecutionError: \u6267\u884c\u8282\u70b9r\u51fa\u9519\u4e86: IndexError: list index out of range",
+   "error_contains": "IndexError: list index out of range"
+  },
+  "flow": {
+   "flow_id": "reduce_empty_no_initial",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.add($INPUT.first, $INPUT.second)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "r",
+     "next": "o",
+     "type": "reduce"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": null
+  },
+  "name": "reduce_empty_no_initial"
+ },
+ {
+  "expected": {
+   "output": 100
+  },
+  "flow": {
+   "flow_id": "reduce_empty_with_initial",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.add($INPUT.first, $INPUT.second)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "r",
+     "initial": 100,
+     "next": "o",
+     "type": "reduce"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": null
+  },
+  "name": "reduce_empty_with_initial"
+ },
+ {
+  "expected": {
+   "output": 7
+  },
+  "flow": {
+   "flow_id": "reduce_single_no_initial",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.add($INPUT.first, $INPUT.second)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "r",
+     "next": "o",
+     "type": "reduce"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    7
+   ]
+  },
+  "name": "reduce_single_no_initial"
+ },
+ {
+  "expected": {
+   "output": "abc"
+  },
+  "flow": {
+   "flow_id": "reduce_string_concat",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$F.concat($INPUT.first, $INPUT.second)",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "r",
+     "initial": "",
+     "next": "o",
+     "type": "reduce"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    "a",
+    "b",
+    "c"
+   ]
+  },
+  "name": "reduce_string_concat"
+ },
+ {
+  "expected": {
+   "output": 2
+  },
+  "flow": {
+   "flow_id": "while_basic",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "w",
+     "type": "start"
+    },
+    {
+     "child_flow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.index",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "condition": {
+      "field": "$LOOP-INDEX",
+      "operator": "lt",
+      "value": 3
+     },
+     "id": "w",
+     "next": "o",
+     "type": "while"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.w",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "while_basic"
+ },
+ {
+  "expected": {
+   "output": 3
+  },
+  "flow": {
+   "flow_id": "while_item_chain",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "w",
+     "type": "start"
+    },
+    {
+     "child_flow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_if",
+        "type": "start"
+       },
+       {
+        "condition": {
+         "field": "$INPUT.item",
+         "operator": "ne",
+         "value": null
+        },
+        "else_next": "c_f",
+        "id": "c_if",
+        "next": "c_t",
+        "type": "if"
+       },
+       {
+        "id": "c_t",
+        "output": "$F.add($INPUT.item, 1)",
+        "resultType": "success",
+        "type": "end"
+       },
+       {
+        "id": "c_f",
+        "output": 0,
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "condition": {
+      "conditions": [
+       {
+        "field": "$LOOP-ITEM",
+        "operator": "eq",
+        "value": null
+       },
+       {
+        "field": "$LOOP-ITEM",
+        "operator": "lt",
+        "value": 3
+       }
+      ],
+      "relation": "or"
+     },
+     "id": "w",
+     "next": "o",
+     "type": "while"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.w",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "while_item_chain"
+ },
+ {
+  "expected": {
+   "output": 4
+  },
+  "flow": {
+   "flow_id": "while_max_iterations",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "w",
+     "type": "start"
+    },
+    {
+     "child_flow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.index",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "condition": {
+      "field": "$INPUT.on",
+      "operator": "eq",
+      "value": true
+     },
+     "id": "w",
+     "max_iterations": 5,
+     "next": "o",
+     "type": "while"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.w",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "on": true
+  },
+  "name": "while_max_iterations"
+ },
+ {
+  "expected": {
+   "output": 999
+  },
+  "flow": {
+   "flow_id": "while_default_limit",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "w",
+     "type": "start"
+    },
+    {
+     "child_flow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.index",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "condition": {
+      "field": "$INPUT.on",
+      "operator": "eq",
+      "value": true
+     },
+     "id": "w",
+     "next": "o",
+     "type": "while"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.w",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "on": true
+  },
+  "name": "while_default_limit"
+ },
+ {
+  "expected": {
+   "output": null
+  },
+  "flow": {
+   "flow_id": "while_zero_rounds",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "w",
+     "type": "start"
+    },
+    {
+     "child_flow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.index",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "condition": {
+      "field": "$LOOP-INDEX",
+      "operator": "gt",
+      "value": 0
+     },
+     "id": "w",
+     "next": "o",
+     "type": "while"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.w",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "while_zero_rounds"
+ },
+ {
+  "expected": {
+   "output": 0
+  },
+  "flow": {
+   "flow_id": "while_no_condition",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "w",
+     "type": "start"
+    },
+    {
+     "child_flow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_e",
+        "type": "start"
+       },
+       {
+        "id": "c_e",
+        "output": "$INPUT.index",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "id": "w",
+     "next": "o",
+     "type": "while"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.w",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "while_no_condition"
+ },
+ {
+  "expected": {
+   "error": "NodeExecutionError: \u6267\u884c\u8282\u70b9w\u51fa\u9519\u4e86: ErrorResultException: boom"
+  },
+  "flow": {
+   "flow_id": "while_error_propagation",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "w",
+     "type": "start"
+    },
+    {
+     "child_flow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_if",
+        "type": "start"
+       },
+       {
+        "condition": {
+         "field": "$INPUT.index",
+         "operator": "eq",
+         "value": 1
+        },
+        "else_next": "c_ok",
+        "id": "c_if",
+        "next": "c_err",
+        "type": "if"
+       },
+       {
+        "error": {
+         "code": "500",
+         "message": "boom"
+        },
+        "id": "c_err",
+        "resultType": "error",
+        "type": "end"
+       },
+       {
+        "id": "c_ok",
+        "output": "$INPUT.index",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "condition": {
+      "field": "$LOOP-INDEX",
+      "operator": "lt",
+      "value": 10
+     },
+     "id": "w",
+     "next": "o",
+     "type": "while"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.w",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "while_error_propagation"
+ },
+ {
+  "expected": {
+   "output": [
+    2,
+    0,
+    1
+   ]
+  },
+  "flow": {
+   "flow_id": "while_nested_in_map",
+   "inputType": {
+    "dataType": "object"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "object"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "w",
+        "type": "start"
+       },
+       {
+        "child_flow": {
+         "inputType": {
+          "dataType": "object"
+         },
+         "nodes": [
+          {
+           "id": "c_s",
+           "next": "c_e",
+           "type": "start"
+          },
+          {
+           "id": "c_e",
+           "output": "$INPUT.index",
+           "resultType": "success",
+           "type": "end"
+          }
+         ],
+         "runtime": "python"
+        },
+        "condition": {
+         "field": "$LOOP-INDEX",
+         "operator": "lt",
+         "value": "$INPUT.item"
+        },
+        "id": "w",
+        "next": "c_e",
+        "type": "while"
+       },
+       {
+        "id": "c_e",
+        "output": "$NODE.w",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "collection": "$INPUT.items",
+     "id": "m",
+     "next": "o",
+     "type": "map"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "items": [
+    3,
+    1,
+    2
+   ]
+  },
+  "name": "while_nested_in_map"
+ }
+]

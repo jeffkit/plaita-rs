@@ -66,10 +66,12 @@ fn child_fixture() {
 #[test]
 fn load_rejects() {
     let cases: Vec<(&str, &str, &str)> = vec![
+        // mock 已随 #80 对齐转正（tests/node_parity_golden.rs 对拍）；拒载面
+        // 改钉 calculate——plaita 同样不注册该类型（unRecognized node type）。
         (
             "unsupported known type",
-            r#"{"nodes":[{"type":"start","id":"s","next":"d"},{"type":"mock","id":"d"}]}"#,
-            "mock",
+            r#"{"nodes":[{"type":"start","id":"s","next":"d"},{"type":"calculate","id":"d"}]}"#,
+            "unRecognized node type: calculate",
         ),
         (
             "unknown type",

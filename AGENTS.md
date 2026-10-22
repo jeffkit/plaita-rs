@@ -9,7 +9,8 @@
 - **在范围内**：部署形态 IR 装载（归一化 + 校验 + fail-closed 拒载）、plaita 表达式语言、
   执行引擎（变量根 / 条件 / 循环 / 并行 / 子流程 / 错误·超时·重试策略 / 事件回调）、
   内置节点（start / end / assignment / switch / if / loop / parallel / child /
-  code〔python sidecar〕/ http）。
+  code〔python sidecar〕/ http；**#80 对齐转正**：map / filter / find / reduce /
+  while / case〔脱糖 switch〕/ mock / reference〔provider 注入〕）。
 - **不在范围内（刻意不做）**：`pkg/worker`（Redis Streams 消费、租约 Lua、fence、DLQ、
   checkpoint 恢复、drain）、console BFF、沙箱 driver、影子对账 harness、agentproc。
   plaita-go 的这些层按 queue/lease 协议接 worker，本仓接不进来也不需要。
@@ -33,10 +34,16 @@ crates/
                        确定性错误不重试、超时归属（FLOW_ERROR vs NODE_ERROR）、错误/超时策略
                        （abort/continue/continue-with + code/message + $ERROR 记账）、事件回调
     src/nodes/         节点体：condition（15 算子 + None 短路）、loop（末次子结果语义）、
+                       map/filter/find/reduce/while（集合并五类，loop.py 逐语义）、
+                       mock（value 原样透传不求值）、reference（child_isolated 隔离上下文）、
                        parallel（joinBranches 空=全后台；分支失败=错误哨兵）、
                        code（python3 sidecar，镜像 plaita _RUNNER_TEMPLATE + env 白名单 + 进程组超时）、
                        http（{data,status,statusText,headers} 契约；非 2xx 不是错误）
   plaita-cli/          bin `plaita-rs`：run / validate / eval
+scripts/
+  extract_python_node_types.py   Python↔Rust 节点清单差分门的权威提取器
+                                 （自 plaita-go 同名脚本 vendor；从 plaita NodeRegistry 现场取清单，
+                                 entry points 不可见/插件加载失败即硬失败，绝不输出缩水清单）
 tools/
   go-ref/              Go 参照 runner：直接 import ../plaita-go 的 pkg/ir 执行同一 flow
   go-ref-bin           编译产物（本地构建）
@@ -72,6 +79,44 @@ tools/
    `FlowError::Cancelled` code:-4 且先于重试/errorHandler、code 沙箱等待循环 killpg 整树、
    退避 0.5s 分片可打断、默认步界取消、Host 克隆共享=父子链传播；Go 无此面，Python
    runner/executor 2026-10 波次③语义，出处 plaita#267）。
+9. **$PARENT 未知根 → null**（表达式层，#80 对齐）：`$PARENT.<名字>` 命名父作用域的
+   一个根，父上不存在的根求值为 null（快照对象缺省字段读；golden `ref_parent_isolation`
+   的 `$PARENT.n` → null 钉）——不再 KeyError。无父执行时行为不变（仍报错）。
+
+## 节点对齐：plaita-go#80 parity 的 Rust 侧（2026-10-23）
+
+**已转正 8 类**（golden 67 例逐例对拍 plaita Python 真跑 oracle，
+`tests/node_parity_golden.rs`；golden 文件自 plaita-go `pkg/ir/testdata/` 逐字复用）：
+
+- **集合五类 map/filter/find/reduce/while**：loop.py BaseCollectionNode 家族逐语义
+  （字符串集合按 JSON 数组解析/普通串单元素；reduce 的 initial 缺省取首元素、空集合
+  无 initial = 确定性 IndexError；while 先判断后执行、condition 缺省单轮、
+  max_iterations 缺省 1000 触顶仅告警；map 的 concurrent（历史别名 async）并发走
+  进程级许可池（缺省 8）+ maxConcurrent gate、池内线程降级串行、错误取最小失败下标）。
+- **case** = decide.py SwitchLegacy 的装载期脱糖为 switch（每条 case → Branch(eq
+  target, value, next=case.id) + 恒置 isDefault 兜底；default 缺省=字面 "default" 节点
+  id；target 缺省以 `$NULL` 承载；缺 id/value 装载期拒）；metadata.caseDialect 留痕。
+- **mock** = value 原样透传不求值（pin 语义），output 字段忽略。
+- **reference** = `ir::load_with_flow_provider` + `FlowProvider` 装载期注入 childFlow
+  （plaita 调度器角色的引擎侧对应物）；inline childFlow 在 reference 上具名拒绝
+  （Python 运行时把它丢掉、执行期才炸——不给跨运行时假象）；嵌套解析深度 32、环
+  具名拒、菱形不误伤；子流程走 `RuntimeCtx::child_isolated`——`$GLOBAL`/`$ENV`/执行
+  身份继承、`$PARENT` 指向空 ambient 执行（`$PARENT.<x>` → null，隔离实测口径）；
+  input 缺省继承调用方 $INPUT。
+
+**capability 契约面**（plaita#300 五键形态）：`ir::capability_manifest()` +
+`ir::CONTRACT_VERSION`（2026-10-23.1）；`features`/`node_dependencies` 恒空（无
+checkpoint/hitl/suspend 面）。
+
+**防漂移门**：`make node-parity`（CI 同名 job）——`scripts/extract_python_node_types.py`
+从 plaita NodeRegistry（core 内建 + `plaita.nodes` entry points）现场提取权威清单，
+`tests/node_type_parity.rs` 对拍 `ir::SUPPORTED_NODE_TYPES`：**双向差集必须恰等于显式
+例外表**，单侧新增/例外过期即红；例外条目必须同时在 `KNOWN_UNSUPPORTED` 有具名 hint。
+例外 28+1 条：挂起族 7（event/hitl_await/delay/approval/redis_queue/kafka_queue/
+http_callback——等待/恢复全在引擎外，实装前置=先建 suspend/resume 执行架构）+
+外部宿主族 21（agentrun + plaita-nodes，含 sql_query=plaita-go#84 同源评估）+
+Rust-only `code`（Python 刻意 opt-in 注册）。负控双实证：权威清单缩水→红、
+未设 env→skip（普通 cargo test 不受影响）。
 
 ## 审计记录（2026-10-21，四路子智能体对抗审计）
 
@@ -115,58 +160,7 @@ tools/
 ```bash
 # 参照侧：Go runner（依赖本机 plaita-go checkout；首次需
 #   cd tools/go-ref && GOPROXY=https://goproxy.cn,direct GOSUMDB=off go mod tidy && go build -o ../go-ref-bin .）
-python3 tools/diffcheck.py     # 15/15 用例与 plaita-go 双跑一致（2026-10-21 基线）
-```
-
-用例覆盖：plaita codeflow 编译器真产物（loop/parallel/child）、console 真实导出
-（assignment_flow）、if/switch/条件算子、loop 条件早退、表达式混搭、错误策略 continue、
-双端错误路径。**改 IR 契约、条件算子、节点语义前先跑它**；新增语义对齐时往 MANIFEST 加用例。
-
-## 测试与门禁
-
-```bash
-cargo test                                   # 全仓：单测 + golden + 端到端 flow 测试
-cargo test -p plaita-expression              # 29 单测 + 43 条 plaita golden（tests/golden.rs）
-cargo test -p plaita-engine --test flows     # 真实 testdata flow 端到端（断言与 Go 侧相同输出）
-cargo clippy --all-targets                   # 应保持零告警
-```
-
-- **golden 纪律**：`crates/plaita-expression/testdata/expression_golden.json` 是从 plaita
-  测试导出的逐字副本，禁止手改；Python 侧语义升级后用 plaita-go 的
-  `scripts/export_golden.py` 重新导出并同步到本仓。
-- **testdata 纪律**：`crates/plaita-engine/testdata/*.json` 来自 plaita-go `pkg/ir/testdata/`
-  （真实 console 导出 + codeflow 编译产物），同样禁止手改。
-
-## 环境备注（本机）
-
-- cargo 在 `~/.cargo/bin`（不在默认 PATH）。
-- 本机不可达 `static.crates.io`；本项目用 **rsproxy.cn** 镜像，配置在
-  `.cargo/config.toml`（**已 gitignore**，换机器需重建一份）。
-- Go 参照 runner 构建需 `GOPROXY=https://goproxy.cn,direct GOSUMDB=off`（同 plaita-go 的本机约定）。
-
-## 约定
-
-- 引擎逻辑活在 flow 图里（jeffkit 红线）；不做「宿主代码 + flow 皮」。
-- 所有降级（错误/超时策略、重试）必须可观测：事件回调 + `$ERROR` 记账，禁止静默。
-- IR 契约只认一种表示（plaita 部署 camelCase JSON）；schema 变更必须同步
-  normalize/validate 与 golden（吸取 plaita「DSL 三表示往返无不变量」的教训）。
-## 对账发现已提报 plaita-go 的单（移植差分坐实，2026-10-21）
-
-- #40 `$F.index` 对 str 返回字节下标（Python 按字符）——本仓按字符实现；
-- #41 capitalize/title 首字符须用 titlecase 映射（'ß'→"Ss" 而非 "SS"）——本仓已按 titlecase 实现；
-- #42 getListItem 对 dict 的字符串键分支不可达（pyIndexArg 先拒 str）——本仓 dict 走 KeyError 语义、
-  同样先拒非整数下标（与 Python 一致的报错面，但 `$F.get` 是正规取键路径）；
-- #43 python sidecar 代码错误与 end FlowResultError 被判可重试（重试 6/4 次实证）——本仓两者均按
-  确定性分类（Deterministic，不烧重试预算）；
-- #44 `$F.sort` 混排静默输出（Python TypeError）——本仓比较错误上抛；
-- #45 `$F.mul` 序列重复超上限静默返回空串——本仓具名错误。
-
-## 差分对账（改行为前必跑）
-
-```bash
-# 参照侧：Go runner（依赖本机 plaita-go checkout；首次需
-#   cd tools/go-ref && GOPROXY=https://goproxy.cn,direct GOSUMDB=off go mod tidy && go build -o ../go-ref-bin .）
-python3 tools/diffcheck.py     # 15/15 用例与 plaita-go 双跑一致（2026-10-21 基线）
+python3 tools/diffcheck.py     # 16/16 用例与 plaita-go 双跑一致（2026-10-23 复核）
 ```
 
 用例覆盖：plaita codeflow 编译器真产物（loop/parallel/child）、console 真实导出

@@ -214,6 +214,18 @@ fn eval_var(root: &str, path: &[Segment], roots: &dyn Roots) -> Result<Value, Ev
                 }
                 Some((Segment::Field(first), rest)) => {
                     let inner_root = canonical_root(first.trim_start_matches('$'));
+                    // plaita-go#80 r78 plaitaexpr 同款语义：`$PARENT.<name>` 命名
+                    // 父作用域的一个根；父上不存在的根求值为 null（快照对象的
+                    // 缺省字段读，reference 隔离 golden `$PARENT.n` → null 钉），
+                    // 不再是 KeyError。标量根（$NULL/$EMPTYSTRING）恒在。
+                    let scalar = scalar_root(&inner_root).is_some();
+                    let mut found = scalar;
+                    if !found {
+                        parent.with_root(&inner_root, &mut |_| found = true);
+                    }
+                    if !found {
+                        return Ok(Value::Null);
+                    }
                     eval_var(&inner_root, rest, parent)
                 }
                 Some((Segment::Index(_), _)) => Err(EvalError::type_error(
@@ -746,5 +758,10 @@ mod tests {
         assert_eq!(eval_str("$PARENT.INPUT.x", &inner).unwrap(), json!("outer"));
         assert!(eval_str("$PARENT", &inner).is_ok());
         assert!(eval_str("$PARENT.$INPUT.x", &MapRoots::new()).is_err());
+        // plaita-go#80 r78 同款：父上不存在的根按快照对象的缺省字段读为
+        // null（reference 隔离 golden `$PARENT.n` → null 钉），不再是 KeyError。
+        assert_eq!(eval_str("$PARENT.n", &inner).unwrap(), json!(null));
+        assert_eq!(eval_str("$PARENT.x", &inner).unwrap(), json!(null));
+        assert_eq!(eval_str("$PARENT.$NODE.any", &inner).unwrap(), json!(null));
     }
 }

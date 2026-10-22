@@ -148,6 +148,53 @@ pub enum NodeKind {
         item_type: Option<Property>,
         child_flow: Box<Flow>,
     },
+    /// map（loop.py Map）：对集合每个元素执行子流程并按集合顺序返回全部结果。
+    Map {
+        collection: Collection,
+        item_type: Option<Property>,
+        concurrent: bool,
+        max_concurrent: Option<i64>,
+        child_flow: Box<Flow>,
+    },
+    /// filter（loop.py Filter）：子流程返回真值的元素进结果集。
+    Filter {
+        collection: Collection,
+        item_type: Option<Property>,
+        child_flow: Box<Flow>,
+    },
+    /// find（loop.py Find）：第一个真值元素；无则 null。
+    Find {
+        collection: Collection,
+        item_type: Option<Property>,
+        child_flow: Box<Flow>,
+    },
+    /// reduce（loop.py Reduce）：累积链；initial 缺省取首元素（空集合且无
+    /// initial 是确定性错误，对齐 Python 的 IndexError）。
+    Reduce {
+        collection: Collection,
+        item_type: Option<Property>,
+        initial: Option<Value>,
+        child_flow: Box<Flow>,
+    },
+    /// while（loop.py While）：先判断后执行的条件循环；condition 缺省只跑
+    /// 一轮；max_iterations 缺省 1000，触顶仅告警不报错。
+    While {
+        condition: Option<Value>,
+        max_iterations: Option<i64>,
+        child_flow: Box<Flow>,
+    },
+    /// mock（mock.py Mock，数据固定 pin 占位）：value 原样透传不求值，
+    /// output 字段忽略（golden mock_output_ignored 钉）。
+    Mock {
+        value: Option<Value>,
+    },
+    /// reference（child.py ReferenceFlow，引用逻辑）：childFlow 由
+    /// FlowProvider 在装载期注入；子流程隔离父上下文（$PARENT.<x> → null，
+    /// $GLOBAL/$ENV/执行身份继承），input 缺省继承调用方 $INPUT。
+    Reference {
+        child_flow: Box<Flow>,
+        input: Option<Value>,
+    },
     Parallel {
         branches: Vec<ParallelBranchDef>,
         is_conditional: bool,
