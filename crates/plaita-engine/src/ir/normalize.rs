@@ -22,7 +22,9 @@ use serde_json::{Map, Value};
 use std::time::Instant;
 
 use crate::duration;
-use crate::ir::support::{as_float, get_str, is_object, next_is_empty, obj, stash_into, take};
+use crate::ir::support::{
+    as_float, get_str, is_object, next_is_empty, obj, stash_into, take, type_name,
+};
 use crate::ir::{scope::Scope, validate};
 
 /// Node type accept-list (strict, fail-closed): types this engine implements.
@@ -445,6 +447,15 @@ fn translate_switch(n: &mut Map<String, Value>) -> Result<(), String> {
 /// loader refuses it instead of silently succeeding).
 fn translate_if(n: &mut Map<String, Value>) -> Result<(), String> {
     fold_key(n, "elseNext", "else_next");
+    // 类型错误的 else_next 不再被 get_str 折成 "" 误报「缺假分支目标」(#9)
+    if let Some(v) = n.get("else_next") {
+        if !v.is_null() && !v.is_string() {
+            return Err(format!(
+                "if node field \"else_next\" must be a string, got {}",
+                type_name(v)
+            ));
+        }
+    }
     if next_is_empty(n) {
         return Err("if node requires a true-branch target (next)".to_string());
     }

@@ -724,3 +724,155 @@ fn timeout_beyond_instant_range_rejected_at_load() {
     let err = err_of(f(json!(1e22)));
     assert!(err.contains("exceeds the platform instant range"), "{err}");
 }
+
+// -- typed 字段闸（#9：present 但类型不符 = 装载期具名拒，禁静默降级）------------
+//
+// pre-fix：joinBranches/branches/upstreamOutput 降级成空集合（parallel 变全后台
+// 结果丢失/分支全消失），next/else_next 降级成 None/""（R1/R3 缺边全绿假象）——
+// 校验与运行链路全绿。Go typed unmarshal / Python pydantic 都在装载期拒。
+
+fn parallel_join_doc(join_branches: Value, branches: Value) -> Value {
+    let mut d = json!({
+        "flowId": "joinstr",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "p"},
+            {"type": "parallel", "id": "p", "next": "e", "branches": [
+                {"name": "b1", "flow": {"nodes": [
+                    {"type": "start", "id": "s", "next": "e"},
+                    {"type": "end", "id": "e", "output": {"v": 1}}]}}]},
+            {"type": "end", "id": "e", "resultType": "success",
+             "output": {"parallel_result": "$NODE.p"}}
+        ]
+    });
+    if !join_branches.is_null() {
+        d["nodes"][1]["joinBranches"] = join_branches;
+    }
+    if !branches.is_null() {
+        d["nodes"][1]["branches"] = branches;
+    }
+    d
+}
+
+#[test]
+fn typed_field_wrong_type_rejected_at_load() {
+    // joinBranches 漏方括号（issue 实测形状）：静默降级成 [] = 全后台、结果丢失
+    let err = err_of(parallel_join_doc(json!("b1"), json!(null)));
+    assert!(
+        err.contains("joinBranches") && err.contains("must be an array"),
+        "{err}"
+    );
+
+    // joinBranches 元素非字符串（Go []string 同拒；pre-fix 被 filter_map 丢掉）
+    let err = err_of(parallel_join_doc(json!(["b1", 42]), json!(null)));
+    assert!(
+        err.contains("joinBranches[1]") && err.contains("must be"),
+        "{err}"
+    );
+
+    // parallel.branches 非数组 → 分支全部消失、flow 照样 success 的静默面
+    let err = err_of(parallel_join_doc(json!(null), json!("b1")));
+    assert!(
+        err.contains("branches") && err.contains("must be an array"),
+        "{err}"
+    );
+
+    // switch.branches 非数组，同型
+    let doc = json!({
+        "flowId": "swstr",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "sw"},
+            {"type": "switch", "id": "sw", "next": "e", "branches": "b1"},
+            {"type": "end", "id": "e", "resultType": "success", "output": "x"}
+        ]
+    });
+    let err = err_of(doc);
+    assert!(
+        err.contains("branches") && err.contains("must be an array"),
+        "{err}"
+    );
+
+    // assignment.upstreamOutput 非数组 → 上游声明被静默忽略
+    let doc = json!({
+        "flowId": "upstr",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "a"},
+            {"type": "assignment", "id": "a", "next": "e", "upstreamOutput": "x"},
+            {"type": "end", "id": "e", "resultType": "success", "output": "x"}
+        ]
+    });
+    let err = err_of(doc);
+    assert!(
+        err.contains("upstreamOutput") && err.contains("must be an array"),
+        "{err}"
+    );
+
+    // next 非字符串：if 节点形状（else_next 保底让 R1 看不见缺边）——要求在
+    // 装载/校验期就红，而不是 run 期 code 10000
+    let doc = json!({
+        "flowId": "nextnum",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "q"},
+            {"type": "if", "id": "q", "next": 42, "else_next": "no",
+             "condition": {"field": "$INPUT.v", "operator": "truthy", "value": null}},
+            {"type": "end", "id": "no", "resultType": "success", "output": "n"}
+        ]
+    });
+    let err = err_of(doc);
+    assert!(
+        err.contains("\"next\"") && err.contains("must be a string"),
+        "{err}"
+    );
+
+    // else_next 非字符串：不再被 get_str 折成 "" 误报「缺假分支目标」
+    let doc = json!({
+        "flowId": "elsenum",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "q"},
+            {"type": "if", "id": "q", "next": "yes", "else_next": 7,
+             "condition": {"field": "$INPUT.v", "operator": "truthy", "value": null}},
+            {"type": "end", "id": "yes", "resultType": "success", "output": "y"}
+        ]
+    });
+    let err = err_of(doc);
+    assert!(
+        err.contains("else_next") && err.contains("must be a string"),
+        "{err}"
+    );
+}
+
+#[test]
+fn typed_field_positive_controls_unchanged() {
+    // joinBranches:["b1"]：装载 + join 语义生效（分支结果进 $NODE.p）
+    let flow = load(parallel_join_doc(json!(["b1"]), json!(null))).unwrap();
+    assert_eq!(
+        flow.execute(&json!({}), &plaita_engine::Host::new())
+            .unwrap(),
+        json!({"parallel_result": {"b1": {"v": 1}}})
+    );
+
+    // 缺省 joinBranches：仍合法装载，全后台语义不变（节点立即返回 {}）
+    let flow = load(parallel_join_doc(json!(null), json!(null))).unwrap();
+    assert_eq!(
+        flow.execute(&json!({}), &plaita_engine::Host::new())
+            .unwrap(),
+        json!({"parallel_result": {}})
+    );
+
+    // joinBranches:null 同缺省（Go null → 零值同语义）
+    assert!(load(parallel_join_doc(json!(Value::Null), json!(null))).is_ok());
+
+    // null / 空串 next 仍是合法「无后继」
+    for next in [Value::Null, json!("")] {
+        let doc = json!({
+            "flowId": "nullnext",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "e"},
+                {"type": "end", "id": "e", "resultType": "success", "output": "x", "next": next}
+            ]
+        });
+        assert!(load(doc).is_ok());
+    }
+
+    // joinBranches:null 同缺省（Go null → 零值同语义）
+    assert!(load(parallel_join_doc(json!(Value::Null), json!(null))).is_ok());
+}

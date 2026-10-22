@@ -37,6 +37,19 @@ pub(crate) fn is_object(v: &Value) -> bool {
     v.is_object()
 }
 
+/// JSON type name for the typed-field gate's "got" half (mirrors the Go
+/// unmarshal / pydantic wording: must be X, got string).
+pub(crate) fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 pub(crate) fn obj<const N: usize>(pairs: [(&str, Value); N]) -> Value {
     let mut m = Map::new();
     for (k, v) in pairs {
