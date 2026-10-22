@@ -372,7 +372,9 @@ fn zero_budget_fails_immediately_and_continue_yields_nil() {
         .unwrap_err();
     assert!(err.to_string().contains("deadline"), "{err}");
 
-    // 零预算 + flow 级 timeoutHandler continue → nil 结果、不报错
+    // 零预算 + flow 级 timeoutHandler continue：预算到期终态（issue #14）
+    // ——流级 handler 不再软着陆（先前返回 Ok(null)，把预算违规洗成
+    // 成功值；Python 权威侧预算到期恒 ExecutionDeadlineError）
     let doc = json!({
         "flow_id": "zero_budget_continue",
         "timeout": "PT0S",
@@ -383,10 +385,10 @@ fn zero_budget_fails_immediately_and_continue_yields_nil() {
         ]
     });
     let flow = load(doc).unwrap();
-    let got = flow
+    let err = flow
         .execute(&json!({}), &plaita_engine::Host::new())
-        .unwrap();
-    assert_eq!(got, json!(null));
+        .unwrap_err();
+    assert!(err.to_string().contains("deadline"), "{err}");
 }
 
 // -- handler code/message 折叠（Go NormalizeHandlerCodeMessage 对应物） ---------

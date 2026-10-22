@@ -166,10 +166,18 @@ impl Flow {
             });
             match result {
                 Ok(v) => return Ok(v),
+                // 流级预算到期 = 终态（#14）：timeoutHandler 不拦截。
+                // Python 权威侧无流级 handler，预算到期恒
+                // ExecutionDeadlineError；continue/continue-with 会把预算
+                // 违规洗成成功值（p1c 负控面），execute_on 同。
+                Err(e) if matches!(e, FlowError::FlowTimeout { .. }) => return Err(e),
+                // 节点自有超时按 abort 传播时仍走流级 timeoutHandler
+                // （Go 移植面；#14 只裁「预算到期」这一面）
                 Err(e) if e.is_flow_budget_timeout() => {
-                    // The flow budget fired: the flow-level timeout policy
-                    // decides (continue → nil result, continue-with →
-                    // default, abort/none → the error propagates).
+                    // The node's own timeout propagated: the flow-level
+                    // timeout policy decides (continue → nil result,
+                    // continue-with → default, abort/none → the error
+                    // propagates).
                     match self.timeout_handler.strategy {
                         Some(HandleStrategy::Continue) => return Ok(Value::Null),
                         Some(HandleStrategy::ContinueWith) => {
@@ -231,6 +239,11 @@ impl Flow {
             });
             match result {
                 Ok(v) => return Ok(v),
+                // 流级预算到期 = 终态（#14），同 execute：timeoutHandler
+                // 不拦截预算违规。
+                Err(e) if matches!(e, FlowError::FlowTimeout { .. }) => return Err(e),
+                // 节点自有超时按 abort 传播时仍走流级 timeoutHandler（Go
+                // 移植面；#14 只裁「预算到期」这一面）
                 Err(e) if e.is_flow_budget_timeout() => match self.timeout_handler.strategy {
                     Some(HandleStrategy::Continue) => return Ok(Value::Null),
                     Some(HandleStrategy::ContinueWith) => {
@@ -301,13 +314,19 @@ impl Flow {
         // (None, Some(nt)) 走 checked——节点预算在装载期已被 24h cap 关死，
         // 这里只防程序化构造：溢出意味着预算大到等效无界，回落无 deadline
         // 与 min 语义一致。
-        let node_deadline: Option<Instant> = match (flow_deadline, node.timeout) {
-            (Some(fd), Some(nt)) => {
-                Some(Instant::now() + nt.min(fd.saturating_duration_since(Instant::now())))
+        // 单点取 now（#14 归属修正）：先前两次 Instant::now() 使
+        // nd = t1 + (fd - t2) = fd - ε（ε 为取时差，恒正），归属判定
+        // 的 nd < fd 恒判成节点预算、节点 timeoutHandler 被咨询。单点
+        // 取时流预算更紧则 nd 与 fd 精确相等，归属退化为静态预算比较
+        // （plaita runner.py:631-634：更紧的配置预算决定归属）。
+        let node_deadline: Option<Instant> = {
+            let now = Instant::now();
+            match (flow_deadline, node.timeout) {
+                (Some(fd), Some(nt)) => Some(now + nt.min(fd.saturating_duration_since(now))),
+                (Some(fd), None) => Some(fd),
+                (None, Some(nt)) => now.checked_add(nt),
+                (None, None) => None,
             }
-            (Some(fd), None) => Some(fd),
-            (None, Some(nt)) => Instant::now().checked_add(nt),
-            (None, None) => None,
         };
 
         let mut attempt: u64 = 0;
@@ -399,10 +418,26 @@ impl Flow {
         }
 
         if let Some(ne) = final_err {
+            // 流级预算到期是终态（#14）：先于节点 timeout/error 策略链
+            // 直抛。Python 权威（runner.py:655-679）里预算到期具名且不可
+            // 吞——「否则一个 continue 策略就能把 deadline 变成摆设」。
+            // 归属由 flow_budget_binding 判定（流预算更紧 ⇒ nd==fd，见上）。
+            if ne.class == ErrorClass::Timeout && flow_budget_binding(rc, node_deadline) {
+                return Err(FlowError::FlowTimeout {
+                    message: format!(
+                        "flow execution timed out: flow budget exceeded while running node \
+                         {node_id:?} ({node_type})",
+                        node_id = node.id,
+                        node_type = node.node_type,
+                    ),
+                });
+            }
             let mut flow_err = FlowError::node(&node.id, &node.node_type, ne.clone());
             // 超时 abort 的包裹来源是 timeoutHandler（Go 先以它包裹，
             // errorHandler 的包裹遇已包裹错误会跳过）；两处都没配则维持裸错
-            if ne.class == ErrorClass::Timeout && !flow_budget_binding(rc, node_deadline) {
+            //（预算到期的 Timeout 已在上面终态返回，走到这里的 Timeout
+            // 一律归属节点自有预算）
+            if ne.class == ErrorClass::Timeout {
                 flow_err =
                     flow_err.wrap_handler(node.timeout_policy.code, &node.timeout_policy.message);
             }

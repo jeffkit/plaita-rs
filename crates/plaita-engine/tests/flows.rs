@@ -447,6 +447,116 @@ fn code_node_timeout_policy_is_reachable() {
     assert_eq!(got, json!("soft-landing"));
 }
 
+/// 流级预算到期必须终态：节点 errorHandler:continue 不得吞（issue #14，
+/// p1 负控）。先前预算超时仍走节点策略链，continue 把流程放进 end 节点、
+/// 以 end 裸错收场——Python 权威（runner.py:655-679）为具名终态不可吞。
+#[test]
+fn flow_budget_expiry_is_terminal_despite_node_error_handler() {
+    let data = r#"{
+        "flow_id": "p1-budget-terminal",
+        "timeout": "PT1S",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "c"},
+            {"type": "code", "id": "c", "language": "python", "next": "e",
+             "code": "import time\ndef run(input):\n    time.sleep(5)\n    return 'done'",
+             "input": {},
+             "errorHandler": {"strategy": "continue"}},
+            {"type": "end", "id": "e", "resultType": "success", "output": "$NODE.c"}
+        ]}"#;
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let starts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = starts.clone();
+    let host = Host::new().listen(std::sync::Arc::new(move |e: &plaita_engine::Event| {
+        if let plaita_engine::Event::NodeStart { node_id, .. } = e {
+            sink.lock().unwrap().push(node_id.clone());
+        }
+    }));
+    let err = flow.execute(&json!({}), &host).unwrap_err();
+    // 具名终态：归属流预算（"timed out"），不是 end 节点的裸错
+    assert!(err.to_string().contains("timed out"), "{err}");
+    // end 节点永不执行：事件流只有 s、c 两次 node_start
+    assert_eq!(
+        *starts.lock().unwrap(),
+        vec!["s".to_string(), "c".to_string()]
+    );
+}
+
+/// 流预算更紧时归属不得漂移到节点预算：节点 timeoutHandler 不得被咨询
+/// （issue #14 p1b 负控——先前双取 Instant::now() 使 nd=fd-ε，归属恒判
+/// 成节点预算，timeoutHandler:continue 吞掉流预算后流程继续跑）。
+#[test]
+fn flow_budget_expiry_terminal_despite_node_timeout_handler() {
+    let data = r#"{
+        "flow_id": "p1b-budget-attribution",
+        "timeout": "PT1S",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "c"},
+            {"type": "code", "id": "c", "language": "python", "next": "e",
+             "timeout": "PT5S",
+             "timeoutHandler": {"strategy": "continue"},
+             "code": "import time\ndef run(input):\n    time.sleep(5)\n    return 'done'",
+             "input": {}},
+            {"type": "end", "id": "e", "resultType": "success", "output": "$NODE.c"}
+        ]}"#;
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let starts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = starts.clone();
+    let host = Host::new().listen(std::sync::Arc::new(move |e: &plaita_engine::Event| {
+        if let plaita_engine::Event::NodeStart { node_id, .. } = e {
+            sink.lock().unwrap().push(node_id.clone());
+        }
+    }));
+    let err = flow.execute(&json!({}), &host).unwrap_err();
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert_eq!(
+        *starts.lock().unwrap(),
+        vec!["s".to_string(), "c".to_string()]
+    );
+}
+
+/// 流级预算到期的 timeoutHandler 软着陆已裁掉（issue #14 p1c 负控）：
+/// continue-with 不得把预算违规洗成成功值——预算到期恒终态失败
+/// （Python 权威侧无流级 handler）。
+#[test]
+fn flow_budget_expiry_rejects_flow_timeout_handler_soft_landing() {
+    let data = r#"{
+        "flow_id": "p1c-no-soft-landing",
+        "timeout": "PT1S",
+        "timeoutHandler": {"strategy": "continue-with", "defaultValue": "soft-landing"},
+        "nodes": [
+            {"type": "start", "id": "s", "next": "c"},
+            {"type": "code", "id": "c", "language": "python", "next": "e",
+             "code": "import time\ndef run(input):\n    time.sleep(5)\n    return 'done'",
+             "input": {},
+             "errorHandler": {"strategy": "continue"}},
+            {"type": "end", "id": "e", "resultType": "success", "output": "$NODE.c"}
+        ]}"#;
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let err = flow.execute(&json!({}), &Host::new()).unwrap_err();
+    assert!(err.to_string().contains("timed out"), "{err}");
+}
+
+/// 边界守恒（issue #14）：流预算未绑定（节点自有超时更紧）时，节点
+/// timeoutHandler 语义不动——continue-with 照常软着陆。
+#[test]
+fn node_own_timeout_handler_still_reachable_under_flow_budget() {
+    let data = r#"{
+        "flow_id": "node-timeout-under-flow-budget",
+        "timeout": "PT30S",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "k"},
+            {"type": "code", "id": "k", "language": "python", "next": "e",
+             "timeout": "PT1S",
+             "timeoutHandler": {"strategy": "continue-with", "defaultValue": "soft-landing"},
+             "code": "import time\ndef run(input):\n    time.sleep(5)\n    return 1",
+             "input": {}},
+            {"type": "end", "id": "e", "resultType": "success", "output": "$NODE.k"}
+        ]}"#;
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let got = flow.execute(&json!({}), &Host::new()).unwrap();
+    assert_eq!(got, json!("soft-landing"));
+}
+
 /// 指数退避：1s·2^n cap 30s（审计 [高]：先前 1^attempt 恒 1s）。
 /// retryTimes=2 的瞬态错误 → 3 次尝试，墙钟 ≈ 1+2 = 3s。
 #[test]
