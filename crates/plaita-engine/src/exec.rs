@@ -115,9 +115,8 @@ impl Flow {
     /// already-expired deadline) fails immediately instead of letting
     /// budget-ignoring node bodies run to completion (plaita#138).
     pub fn execute(&self, input: &Value, host: &Host) -> Result<Value, FlowError> {
-        // 有意分歧（与 Go 对照）：Go 在 Execute 入口 prepare 一次运行时上下文、
-        // 流级重试轮复用（上一轮的 $NODE/$ERROR 残留进重试轮）；本引擎每轮
-        // 重建干净上下文。依赖该残留的 flow 属于反模式（见 exec 模块注释）。
+        // 流上下文一次性新建（B4 r7 起无流级重试轮——「重试轮复用残留」的
+        // Go 对照面随整流重投撤除而消失；子流/分支走 execute_on 共享 rc）。
         //
         // 执行级缺省预算（plaita#267，Python strategies.py:144
         // `execution_deadline_ms`）：显式 timeout 缺省时补 1800s 总预算
