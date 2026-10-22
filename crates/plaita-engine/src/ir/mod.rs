@@ -19,6 +19,7 @@ mod scope;
 mod support;
 mod validate;
 
+pub use normalize::{KNOWN_UNSUPPORTED, SUPPORTED_NODE_TYPES};
 pub use scope::Scope;
 
 use serde_json::Value;
@@ -27,6 +28,17 @@ use crate::duration;
 use crate::model::{Collection, EndError, Flow, Node, NodeKind, ParallelBranchDef, UpstreamValue};
 use crate::property::Property;
 
+/// The reference-node flow source: resolves a `reference` node's
+/// `flowId`/`flowVersion` to a deployment-form flow document at load time —
+/// the same role plaita's scheduler plays before flow.run (plaita-go#80
+/// phase 2 parity).
+pub trait FlowProvider: Send + Sync {
+    /// Returns the deployment-form flow JSON for the given id/version.
+    /// A resolution failure (unknown id, storage error) fails the load
+    /// (fail-closed).
+    fn load_flow_json(&self, flow_id: &str, flow_version: Option<&str>) -> Result<Value, String>;
+}
+
 /// Parses plaita deployment-form flow JSON and builds the engine flow.
 /// Structural problems (missing start, dangling refs, unreachable nodes,
 /// unsupported node types) are reported as errors before execution.
@@ -34,6 +46,49 @@ pub fn load(data: &[u8]) -> Result<Flow, String> {
     let mut doc: Value =
         serde_json::from_slice(data).map_err(|e| format!("ir: parse flow json: {e}"))?;
     normalize::normalize_doc(&mut doc, Scope::Root)?;
+    let flow: Flow = serde_json::from_value(doc).map_err(|e| format!("ir: build flow: {e}"))?;
+    flow.validate()
+        .map_err(|e| format!("ir: build flow: {e}"))?;
+    Ok(flow)
+}
+
+/// Capability contract version — bump whenever the supported/unsupported
+/// node-type lists change, so consumers caching the manifest don't read a
+/// stale list under an unchanged version (plaita-go#80 discipline).
+pub const CONTRACT_VERSION: &str = "2026-10-23.1";
+
+/// Capability manifest（plaita#300 五键形态，plaita-go#80 parity）：console/
+/// 上层 worker 可据此做 publish/start 能力门。`features`/`node_dependencies`
+/// 恒空——本引擎无 checkpoint/hitl/suspend 面，也没有依赖部署侧设施的
+/// server 节点（挂起族见 KNOWN_UNSUPPORTED 的逐类 hint）。
+pub fn capability_manifest() -> Value {
+    let mut supported: Vec<&str> = SUPPORTED_NODE_TYPES.to_vec();
+    supported.sort_unstable();
+    let mut unsupported: Vec<String> = KNOWN_UNSUPPORTED
+        .iter()
+        .map(|(t, _)| t.to_string())
+        .collect();
+    unsupported.sort();
+    serde_json::json!({
+        "engine": "plaita-rs",
+        "contract_version": CONTRACT_VERSION,
+        "supported_node_types": supported,
+        "unsupported_node_types": unsupported,
+        "features": [],
+        "node_dependencies": {},
+    })
+}
+
+/// [`ir::load`] with a [`FlowProvider`] wired in: `reference` nodes resolve
+/// their `flowId` through the provider at load time and the resolved
+/// sub-flow enters the same normalize + validate pipeline as an inline
+/// childFlow (nested references recurse; cycles fail the load with a named
+/// error).
+pub fn load_with_flow_provider(data: &[u8], provider: &dyn FlowProvider) -> Result<Flow, String> {
+    let mut doc: Value =
+        serde_json::from_slice(data).map_err(|e| format!("ir: parse flow json: {e}"))?;
+    let resolver = normalize::FlowResolver { provider };
+    normalize::normalize_doc_with(&mut doc, Scope::Root, Some(&resolver), 0)?;
     let flow: Flow = serde_json::from_value(doc).map_err(|e| format!("ir: build flow: {e}"))?;
     flow.validate()
         .map_err(|e| format!("ir: build flow: {e}"))?;
@@ -197,19 +252,54 @@ pub(crate) fn node_from_value(v: &Value) -> Result<Node, String> {
                 .unwrap_or_default(),
         },
         "loop" => NodeKind::Loop {
-            collection: match get("collection") {
-                Some(Value::String(s)) => Collection::Expr(s.clone()),
-                Some(Value::Array(a)) => Collection::Array(a.clone()),
-                _ => Collection::Expr(String::new()),
-            },
+            collection: collection_of(obj),
             condition: get("condition").cloned().filter(|c| !c.is_null()),
-            item_type: match get("itemType") {
-                Some(p) if p.is_object() && !p.as_object().unwrap().is_empty() => {
-                    Some(serde_json::from_value::<Property>(p.clone()).map_err(|e| e.to_string())?)
-                }
+            item_type: item_type_of(obj)?,
+            child_flow: child_flow_of(obj)?,
+        },
+        "map" => NodeKind::Map {
+            collection: collection_of(obj),
+            item_type: item_type_of(obj)?,
+            concurrent: obj
+                .get("concurrent")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            max_concurrent: match obj.get("maxConcurrent") {
+                Some(Value::Number(n)) => n.as_i64(),
                 _ => None,
             },
             child_flow: child_flow_of(obj)?,
+        },
+        "filter" => NodeKind::Filter {
+            collection: collection_of(obj),
+            item_type: item_type_of(obj)?,
+            child_flow: child_flow_of(obj)?,
+        },
+        "find" => NodeKind::Find {
+            collection: collection_of(obj),
+            item_type: item_type_of(obj)?,
+            child_flow: child_flow_of(obj)?,
+        },
+        "reduce" => NodeKind::Reduce {
+            collection: collection_of(obj),
+            item_type: item_type_of(obj)?,
+            initial: get("initial").cloned().filter(|v| !v.is_null()),
+            child_flow: child_flow_of(obj)?,
+        },
+        "while" => NodeKind::While {
+            condition: get("condition").cloned().filter(|c| !c.is_null()),
+            max_iterations: match get("max_iterations") {
+                Some(Value::Number(n)) => n.as_i64(),
+                _ => None,
+            },
+            child_flow: child_flow_of(obj)?,
+        },
+        "mock" => NodeKind::Mock {
+            value: get("value").cloned().filter(|v| !v.is_null()),
+        },
+        "reference" => NodeKind::Reference {
+            child_flow: child_flow_of(obj)?,
+            input: get("input").cloned().filter(|v| !v.is_null()),
         },
         "parallel" => NodeKind::Parallel {
             branches: match want_array_field(&node_id, "branches", get("branches"))? {
@@ -296,6 +386,27 @@ fn child_flow_of(obj: &serde_json::Map<String, Value>) -> Result<Box<Flow>, Stri
             Ok(Box::new(flow))
         }
         _ => Err("child node requires an inline childFlow document".to_string()),
+    }
+}
+
+/// The polymorphic `collection` field (loop 家族共享): expression string,
+/// literal array, or absent/null (empty collection — plaita evaluates
+/// None → _coerce_collection → []).
+fn collection_of(obj: &serde_json::Map<String, Value>) -> Collection {
+    match obj.get("collection") {
+        Some(Value::String(s)) => Collection::Expr(s.clone()),
+        Some(Value::Array(a)) => Collection::Array(a.clone()),
+        _ => Collection::Expr(String::new()),
+    }
+}
+
+/// The optional `itemType` schema (loop 家族共享).
+fn item_type_of(obj: &serde_json::Map<String, Value>) -> Result<Option<Property>, String> {
+    match obj.get("itemType") {
+        Some(p) if p.is_object() && !p.as_object().unwrap().is_empty() => Ok(Some(
+            serde_json::from_value::<Property>(p.clone()).map_err(|e| e.to_string())?,
+        )),
+        _ => Ok(None),
     }
 }
 

@@ -1,0 +1,1500 @@
+[
+ {
+  "expected": {
+   "output": "hit"
+  },
+  "flow": {
+   "flow_id": "case_hit",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [
+      {
+       "id": "hit",
+       "value": "a"
+      },
+      {
+       "id": "other",
+       "value": "b"
+      }
+     ],
+     "default": "fb",
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "hit",
+     "next": "o",
+     "output": "H",
+     "type": "assignment"
+    },
+    {
+     "id": "other",
+     "next": "o",
+     "output": "O",
+     "type": "assignment"
+    },
+    {
+     "id": "fb",
+     "next": "o",
+     "output": "F",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "x": "a"
+  },
+  "name": "case_hit"
+ },
+ {
+  "expected": {
+   "output": "hit"
+  },
+  "flow": {
+   "flow_id": "case_first_wins",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [
+      {
+       "id": "hit",
+       "value": 1
+      },
+      {
+       "id": "other",
+       "value": 1
+      }
+     ],
+     "default": "fb",
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "hit",
+     "next": "o",
+     "output": "H",
+     "type": "assignment"
+    },
+    {
+     "id": "other",
+     "next": "o",
+     "output": "O",
+     "type": "assignment"
+    },
+    {
+     "id": "fb",
+     "next": "o",
+     "output": "F",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "x": 1
+  },
+  "name": "case_first_wins"
+ },
+ {
+  "expected": {
+   "output": "fb"
+  },
+  "flow": {
+   "flow_id": "case_default",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [
+      {
+       "id": "hit",
+       "value": "a"
+      }
+     ],
+     "default": "fb",
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "hit",
+     "next": "o",
+     "output": "H",
+     "type": "assignment"
+    },
+    {
+     "id": "fb",
+     "next": "o",
+     "output": "F",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "x": "zzz"
+  },
+  "name": "case_default"
+ },
+ {
+  "expected": {
+   "output": "default"
+  },
+  "flow": {
+   "flow_id": "case_default_implicit_node",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [
+      {
+       "id": "hit",
+       "value": "a"
+      }
+     ],
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "hit",
+     "next": "o",
+     "output": "H",
+     "type": "assignment"
+    },
+    {
+     "id": "default",
+     "next": "o",
+     "output": "D",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "x": "zzz"
+  },
+  "name": "case_default_implicit_node"
+ },
+ {
+  "expected": {
+   "output": "hit"
+  },
+  "flow": {
+   "flow_id": "case_expr_value",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [
+      {
+       "id": "hit",
+       "value": "$INPUT.expect"
+      }
+     ],
+     "default": "fb",
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "hit",
+     "next": "o",
+     "output": "H",
+     "type": "assignment"
+    },
+    {
+     "id": "fb",
+     "next": "o",
+     "output": "F",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "expect": 5,
+   "x": 5
+  },
+  "name": "case_expr_value"
+ },
+ {
+  "expected": {
+   "output": "hit"
+  },
+  "flow": {
+   "flow_id": "case_numeric_eq",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [
+      {
+       "id": "hit",
+       "value": 5.0
+      }
+     ],
+     "default": "fb",
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "hit",
+     "next": "o",
+     "output": "H",
+     "type": "assignment"
+    },
+    {
+     "id": "fb",
+     "next": "o",
+     "output": "F",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "x": 5
+  },
+  "name": "case_numeric_eq"
+ },
+ {
+  "expected": {
+   "output": "hit"
+  },
+  "flow": {
+   "flow_id": "case_none_eq",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [
+      {
+       "id": "hit",
+       "value": null
+      }
+     ],
+     "default": "fb",
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "hit",
+     "next": "o",
+     "output": "H",
+     "type": "assignment"
+    },
+    {
+     "id": "fb",
+     "next": "o",
+     "output": "F",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "case_none_eq"
+ },
+ {
+  "expected": {
+   "output": "fb"
+  },
+  "flow": {
+   "flow_id": "case_empty_cases",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [],
+     "default": "fb",
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "fb",
+     "next": "o",
+     "output": "F",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "x": 1
+  },
+  "name": "case_empty_cases"
+ },
+ {
+  "expected": {
+   "error": "ValidationError: 1 validation error for SwitchLegacy\n  Value error, switch-case node 'c': cases[0] \u7f3a\u5c11\u5fc5\u586b\u7684 'id' \u5b57\u6bb5\uff08\u5f97\u5230 {'value': 1}\uff09\u3002\u6bcf\u4e2a case \u9700\u8981 id/value\uff0c\u53ef\u9009 name\u3002 [type=value_error, input_value={'id': 'c', 'target': '$I...': 1}], 'default': 'fb'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/value_error"
+  },
+  "flow": {
+   "flow_id": "case_missing_id",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [
+      {
+       "value": 1
+      }
+     ],
+     "default": "fb",
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "fb",
+     "next": "o",
+     "output": "F",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "case_missing_id"
+ },
+ {
+  "expected": {
+   "error": "ValidationError: 1 validation error for SwitchLegacy\n  Value error, switch-case node 'c': cases[0] ('hit') \u7f3a\u5c11\u5fc5\u586b\u7684 'value' \u5b57\u6bb5\u3002 [type=value_error, input_value={'id': 'c', 'target': '$I...hit'}], 'default': 'fb'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/value_error"
+  },
+  "flow": {
+   "flow_id": "case_missing_value",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "c",
+     "type": "start"
+    },
+    {
+     "cases": [
+      {
+       "id": "hit"
+      }
+     ],
+     "default": "fb",
+     "id": "c",
+     "target": "$INPUT.x",
+     "type": "case"
+    },
+    {
+     "id": "fb",
+     "next": "o",
+     "output": "F",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.c",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "case_missing_value"
+ },
+ {
+  "expected": {
+   "output": "c_hit"
+  },
+  "flow": {
+   "flow_id": "case_in_child",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "ch",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "any"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_c",
+        "type": "start"
+       },
+       {
+        "cases": [
+         {
+          "id": "c_hit",
+          "value": "on"
+         }
+        ],
+        "default": "c_fb",
+        "id": "c_c",
+        "target": "$INPUT.k",
+        "type": "case"
+       },
+       {
+        "id": "c_hit",
+        "next": "c_o",
+        "output": "switched-on",
+        "type": "assignment"
+       },
+       {
+        "id": "c_fb",
+        "next": "c_o",
+        "output": "fell-back",
+        "type": "assignment"
+       },
+       {
+        "id": "c_o",
+        "output": "$NODE.c_c",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "id": "ch",
+     "input": "$INPUT",
+     "next": "o",
+     "type": "child"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.ch",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "k": "on"
+  },
+  "name": "case_in_child"
+ },
+ {
+  "expected": {
+   "output": "$INPUT.x"
+  },
+  "flow": {
+   "flow_id": "mock_raw_string",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "id": "m",
+     "next": "o",
+     "type": "mock",
+     "value": "$INPUT.x"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "x": "hello"
+  },
+  "name": "mock_raw_string"
+ },
+ {
+  "expected": {
+   "output": {
+    "k": [
+     1,
+     2
+    ],
+    "s": "t"
+   }
+  },
+  "flow": {
+   "flow_id": "mock_dict",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "id": "m",
+     "next": "o",
+     "type": "mock",
+     "value": {
+      "k": [
+       1,
+       2
+      ],
+      "s": "t"
+     }
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "mock_dict"
+ },
+ {
+  "expected": {
+   "output": null
+  },
+  "flow": {
+   "flow_id": "mock_none",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "id": "m",
+     "next": "o",
+     "type": "mock"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "mock_none"
+ },
+ {
+  "expected": {
+   "output": [
+    1,
+    "two",
+    null
+   ]
+  },
+  "flow": {
+   "flow_id": "mock_list",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "id": "m",
+     "next": "o",
+     "type": "mock",
+     "value": [
+      1,
+      "two",
+      null
+     ]
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "mock_list"
+ },
+ {
+  "expected": {
+   "output": "pinned"
+  },
+  "flow": {
+   "flow_id": "mock_output_ignored",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "id": "m",
+     "next": "o",
+     "output": "$INPUT.x",
+     "type": "mock",
+     "value": "pinned"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.m",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {
+   "x": "eval-output"
+  },
+  "name": "mock_output_ignored"
+ },
+ {
+  "expected": {
+   "output": 7
+  },
+  "flow": {
+   "flow_id": "mock_downstream",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "m",
+     "type": "start"
+    },
+    {
+     "id": "m",
+     "next": "a",
+     "type": "mock",
+     "value": {
+      "code": 7
+     }
+    },
+    {
+     "id": "a",
+     "next": "o",
+     "output": "$NODE.m.code",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.a",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "mock_downstream"
+ },
+ {
+  "expected": {
+   "output": "child-pin"
+  },
+  "flow": {
+   "flow_id": "mock_in_child",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "ch",
+     "type": "start"
+    },
+    {
+     "childFlow": {
+      "inputType": {
+       "dataType": "any"
+      },
+      "nodes": [
+       {
+        "id": "c_s",
+        "next": "c_m",
+        "type": "start"
+       },
+       {
+        "id": "c_m",
+        "next": "c_o",
+        "type": "mock",
+        "value": "child-pin"
+       },
+       {
+        "id": "c_o",
+        "output": "$NODE.c_m",
+        "resultType": "success",
+        "type": "end"
+       }
+      ],
+      "runtime": "python"
+     },
+     "id": "ch",
+     "input": "$INPUT",
+     "next": "o",
+     "type": "child"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.ch",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "mock_in_child"
+ },
+ {
+  "expected": {
+   "output": {
+    "got": {
+     "prefix": "kong"
+    },
+    "parent_node": null,
+    "parent_x": null
+   }
+  },
+  "flow": {
+   "flow_id": "ref_basic",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "flow_id": "sub",
+     "id": "r",
+     "input": {
+      "prefix": "$INPUT.name"
+     },
+     "next": "o",
+     "type": "reference"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "flow_registry": {
+   "sub": {
+    "flow_id": "sub",
+    "inputType": {
+     "dataType": "any"
+    },
+    "nodes": [
+     {
+      "id": "sub_s",
+      "next": "sub_e",
+      "type": "start"
+     },
+     {
+      "id": "sub_e",
+      "output": {
+       "got": "$INPUT",
+       "parent_node": "$PARENT.n",
+       "parent_x": "$PARENT.x"
+      },
+      "resultType": "success",
+      "type": "end"
+     }
+    ],
+    "runtime": "python"
+   }
+  },
+  "input": {
+   "name": "kong"
+  },
+  "name": "ref_basic"
+ },
+ {
+  "expected": {
+   "output": {
+    "got": {},
+    "parent_node": null,
+    "parent_x": null
+   }
+  },
+  "flow": {
+   "flow_id": "ref_parent_isolation",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "flow_id": "sub",
+     "id": "r",
+     "input": {},
+     "next": "o",
+     "type": "reference"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "flow_registry": {
+   "sub": {
+    "flow_id": "sub",
+    "inputType": {
+     "dataType": "any"
+    },
+    "nodes": [
+     {
+      "id": "sub_s",
+      "next": "sub_e",
+      "type": "start"
+     },
+     {
+      "id": "sub_e",
+      "output": {
+       "got": "$INPUT",
+       "parent_node": "$PARENT.n",
+       "parent_x": "$PARENT.x"
+      },
+      "resultType": "success",
+      "type": "end"
+     }
+    ],
+    "runtime": "python"
+   }
+  },
+  "input": {
+   "x": "top-x"
+  },
+  "name": "ref_parent_isolation"
+ },
+ {
+  "expected": {
+   "output": {
+    "got": {
+     "z": 42
+    },
+    "parent_node": null,
+    "parent_x": null
+   }
+  },
+  "flow": {
+   "flow_id": "ref_no_input_inherits_caller",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "flow_id": "sub",
+     "id": "r",
+     "next": "o",
+     "type": "reference"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "flow_registry": {
+   "sub": {
+    "flow_id": "sub",
+    "inputType": {
+     "dataType": "any"
+    },
+    "nodes": [
+     {
+      "id": "sub_s",
+      "next": "sub_e",
+      "type": "start"
+     },
+     {
+      "id": "sub_e",
+      "output": {
+       "got": "$INPUT",
+       "parent_node": "$PARENT.n",
+       "parent_x": "$PARENT.x"
+      },
+      "resultType": "success",
+      "type": "end"
+     }
+    ],
+    "runtime": "python"
+   }
+  },
+  "input": {
+   "z": 42
+  },
+  "name": "ref_no_input_inherits_caller"
+ },
+ {
+  "expected": {
+   "output": {
+    "g": "top-token",
+    "inp_z": 9
+   }
+  },
+  "flow": {
+   "flow_id": "ref_global_inherit",
+   "global_context": {
+    "token": "top-token"
+   },
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "flow_id": "sub_global",
+     "id": "r",
+     "input": "$INPUT",
+     "next": "o",
+     "type": "reference"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "flow_registry": {
+   "sub_global": {
+    "flow_id": "sub_global",
+    "inputType": {
+     "dataType": "any"
+    },
+    "nodes": [
+     {
+      "id": "a",
+      "next": "b",
+      "type": "start"
+     },
+     {
+      "id": "b",
+      "output": {
+       "g": "$GLOBAL.token",
+       "inp_z": "$INPUT.z"
+      },
+      "resultType": "success",
+      "type": "end"
+     }
+    ],
+    "runtime": "python"
+   }
+  },
+  "input": {
+   "z": 9
+  },
+  "name": "ref_global_inherit"
+ },
+ {
+  "expected": {
+   "error": "NodeExecutionError: \u6267\u884c\u8282\u70b9r\u51fa\u9519\u4e86: AssertionError: input not match required"
+  },
+  "flow": {
+   "flow_id": "ref_input_mismatch",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "flow_id": "sub_req",
+     "id": "r",
+     "input": "$INPUT",
+     "next": "o",
+     "type": "reference"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "flow_registry": {
+   "sub_req": {
+    "flow_id": "sub_req",
+    "inputType": {
+     "dataType": "object",
+     "properties": {
+      "need": {
+       "dataType": "string",
+       "is_required": true
+      }
+     }
+    },
+    "nodes": [
+     {
+      "id": "a",
+      "next": "b",
+      "type": "start"
+     },
+     {
+      "id": "b",
+      "output": "$INPUT.need",
+      "resultType": "success",
+      "type": "end"
+     }
+    ],
+    "runtime": "python"
+   }
+  },
+  "input": {
+   "wrong": 1
+  },
+  "name": "ref_input_mismatch"
+ },
+ {
+  "expected": {
+   "error": "NodeExecutionError: \u6267\u884c\u8282\u70b9r\u51fa\u9519\u4e86: ErrorResultException: sub-boom"
+  },
+  "flow": {
+   "flow_id": "ref_error_propagation",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "flow_id": "sub_err",
+     "id": "r",
+     "input": "$INPUT",
+     "next": "o",
+     "type": "reference"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "flow_registry": {
+   "sub_err": {
+    "flow_id": "sub_err",
+    "inputType": {
+     "dataType": "any"
+    },
+    "nodes": [
+     {
+      "id": "a",
+      "next": "b",
+      "type": "start"
+     },
+     {
+      "error": {
+       "code": "501",
+       "message": "sub-boom"
+      },
+      "id": "b",
+      "resultType": "error",
+      "type": "end"
+     }
+    ],
+    "runtime": "python"
+   }
+  },
+  "input": {},
+  "name": "ref_error_propagation"
+ },
+ {
+  "expected": {
+   "output": "deep-ok"
+  },
+  "flow": {
+   "flow_id": "ref_nested",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "flow_id": "sub_nested",
+     "id": "r",
+     "input": "$INPUT",
+     "next": "o",
+     "type": "reference"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.r",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "flow_registry": {
+   "sub_nested": {
+    "flow_id": "sub_nested",
+    "inputType": {
+     "dataType": "any"
+    },
+    "nodes": [
+     {
+      "id": "a",
+      "next": "r2",
+      "type": "start"
+     },
+     {
+      "flow_id": "subsub",
+      "id": "r2",
+      "input": "$INPUT",
+      "next": "b",
+      "type": "reference"
+     },
+     {
+      "id": "b",
+      "output": "$NODE.r2",
+      "resultType": "success",
+      "type": "end"
+     }
+    ],
+    "runtime": "python"
+   },
+   "subsub": {
+    "flow_id": "subsub",
+    "inputType": {
+     "dataType": "any"
+    },
+    "nodes": [
+     {
+      "id": "a",
+      "next": "b",
+      "type": "start"
+     },
+     {
+      "id": "b",
+      "output": "deep-ok",
+      "resultType": "success",
+      "type": "end"
+     }
+    ],
+    "runtime": "python"
+   }
+  },
+  "input": {},
+  "name": "ref_nested"
+ },
+ {
+  "expected": {
+   "output": "deep-ok"
+  },
+  "flow": {
+   "flow_id": "ref_result_downstream",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "r",
+     "type": "start"
+    },
+    {
+     "flow_id": "subsub",
+     "id": "r",
+     "input": {
+      "v": 3
+     },
+     "next": "a",
+     "type": "reference"
+    },
+    {
+     "id": "a",
+     "next": "o",
+     "output": "$NODE.r",
+     "type": "assignment"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.a",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "flow_registry": {
+   "subsub": {
+    "flow_id": "subsub",
+    "inputType": {
+     "dataType": "any"
+    },
+    "nodes": [
+     {
+      "id": "a",
+      "next": "b",
+      "type": "start"
+     },
+     {
+      "id": "b",
+      "output": "deep-ok",
+      "resultType": "success",
+      "type": "end"
+     }
+    ],
+    "runtime": "python"
+   }
+  },
+  "input": {},
+  "name": "ref_result_downstream"
+ },
+ {
+  "expected": {
+   "error": "RuntimeError: unRecognized node type: calculate. Available node types: ['agentrun', 'api_request', 'approval', 'assignment', 'capture', 'case', 'child', 'decision', 'delay', 'dingtalk_webhook', 'email_send', 'end', 'event', 'feishu_webhook', 'filter', 'find', 'gate', 'generic_webhook', 'git_publish', 'github_comment', 'hitl', 'hitl_await', 'http', 'http_callback', 'if', 'kafka_queue', 'llm', 'loop', 'map', 'mock', 'notify', 'parallel', 'parse_json', 'rate_limit', 'redis_queue', 'reduce', 'reference', 'report', 'slack_webhook', 'sql_query', 'start', 'switch', 'wecom_webhook', 'while', 'writefile']",
+   "error_contains": "unRecognized node type: calculate"
+  },
+  "flow": {
+   "flow_id": "reject_calculate",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "n1",
+     "type": "start"
+    },
+    {
+     "expression": {
+      "function_name": "add",
+      "params": {
+       "left": 10,
+       "right": 32
+      }
+     },
+     "id": "n1",
+     "next": "o",
+     "type": "calculate"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.n1",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "reject_calculate"
+ },
+ {
+  "expected": {
+   "error": "RuntimeError: unRecognized node type: ignore. Available node types: ['agentrun', 'api_request', 'approval', 'assignment', 'capture', 'case', 'child', 'decision', 'delay', 'dingtalk_webhook', 'email_send', 'end', 'event', 'feishu_webhook', 'filter', 'find', 'gate', 'generic_webhook', 'git_publish', 'github_comment', 'hitl', 'hitl_await', 'http', 'http_callback', 'if', 'kafka_queue', 'llm', 'loop', 'map', 'mock', 'notify', 'parallel', 'parse_json', 'rate_limit', 'redis_queue', 'reduce', 'reference', 'report', 'slack_webhook', 'sql_query', 'start', 'switch', 'wecom_webhook', 'while', 'writefile']",
+   "error_contains": "unRecognized node type: ignore"
+  },
+  "flow": {
+   "flow_id": "reject_ignore",
+   "inputType": {
+    "dataType": "any"
+   },
+   "nodes": [
+    {
+     "id": "s",
+     "next": "n1",
+     "type": "start"
+    },
+    {
+     "id": "n1",
+     "next": "o",
+     "type": "ignore"
+    },
+    {
+     "id": "o",
+     "output": "$NODE.n1",
+     "resultType": "success",
+     "type": "end"
+    }
+   ],
+   "runtime": "python"
+  },
+  "input": {},
+  "name": "reject_ignore"
+ }
+]

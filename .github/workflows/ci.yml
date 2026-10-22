@@ -45,3 +45,42 @@ jobs:
 
       - name: test
         run: cargo test --workspace
+
+  # Python↔Rust node-type parity gate (#80 alignment; plaita-go's node-parity
+  # step is the same shape): extract the authoritative list from the plaita
+  # NodeRegistry (core builtins + plaita.nodes entry points) on LIVE `main`
+  # checkouts — SHA-pinning the authority would defeat the gate — and diff it
+  # against ir::SUPPORTED_NODE_TYPES; the bidirectional delta must equal the
+  # explicit exception table in tests/node_type_parity.rs or the job goes red.
+  node-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: jeffkit/plaita
+          path: plaita
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: jeffkit/plaita-nodes
+          path: plaita-nodes
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66ecda4b2144e76a6a6e28a # v6.0.0
+        with:
+          python-version: "3.12"
+      # Entry points come from INSTALLED distributions (dist-info), sys.path
+      # injection cannot substitute — install both checkouts.
+      - name: install plaita + plaita-nodes
+        run: pip install ./plaita ./plaita-nodes
+      - name: install pinned toolchain
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+          rustup override set 1.98.1
+      - name: node parity
+        run: |
+          python3 scripts/extract_python_node_types.py             --plaita plaita --plaita-nodes plaita-nodes --out node_types.json
+          PLAITA_NODE_TYPES_JSON=node_types.json             cargo test -p plaita-engine --test node_type_parity

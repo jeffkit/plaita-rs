@@ -24,7 +24,7 @@ plaita-rs run testdata/loop_flow.json --input '{"items":[1,2,3]}' --events
 | crate | 内容 |
 |---|---|
 | `plaita-expression` | plaita 表达式语言：文法解析、`$` 变量根、`$F` 函数库（~70）、`{% %}` 模板、Python 真值/缺键语义、PyStr/PyRepr |
-| `plaita-engine` | IR 装载（normalize + validate + fail-closed）、运行时上下文、执行循环（重试/超时/错误策略/事件）、内置节点（start/end/assignment/switch/if/loop/parallel/child/code·python sidecar/http） |
+| `plaita-engine` | IR 装载（normalize + validate + fail-closed）、运行时上下文、执行循环（重试/超时/错误策略/事件）、内置节点（start/end/assignment/switch/if/loop/parallel/child/code·python sidecar/http + #80 对齐：map/filter/find/reduce/while/case/mock/reference） |
 | `plaita-cli` | `plaita-rs` 命令行 |
 
 ## 差分对账

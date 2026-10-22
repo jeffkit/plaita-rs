@@ -119,6 +119,40 @@ impl RuntimeCtx {
         )
     }
 
+    /// Reference-node child context（child.py ReferenceFlow 的引用隔离）：
+    /// `$GLOBAL`/`$ENV`/执行身份与预算合成都从真实父执行种子，但 `$PARENT`
+    /// 链接指向一个**空的 ambient 执行**——子流程读不到父的任何状态，
+    /// `$PARENT.<未知根>` 按表达式语义求值为 null（隔离实测口径，
+    /// plaita-go#80 r78 golden `ref_parent_isolation` 钉）。
+    pub fn child_isolated(
+        parent: &SharedCtx,
+        input: Value,
+        flow_id: &str,
+        flow: &crate::model::Flow,
+        outer_deadline: Option<std::time::Instant>,
+    ) -> SharedCtx {
+        let own = flow
+            .timeout
+            .and_then(|t| std::time::Instant::now().checked_add(t));
+        let deadline = match (own, outer_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        RuntimeCtx::prepare(
+            Some(parent),
+            Some(RuntimeCtx::new().shared()),
+            input,
+            Some(flow_id),
+            flow.context
+                .global
+                .as_ref()
+                .and_then(|g| g.as_object().cloned()),
+            flow.expose_env.as_ref(),
+            None,
+            deadline,
+        )
+    }
+
     /// A deep snapshot of this context: every map copied under the read
     /// lock, scalars copied, the PARENT LINKAGE KEPT (a parallel branch is a
     /// child of the flow that contains the parallel node — plaita#72 pins
@@ -158,6 +192,32 @@ impl RuntimeCtx {
     #[allow(clippy::too_many_arguments)]
     pub fn new_execution(
         parent: Option<&SharedCtx>,
+        input: Value,
+        flow_id: Option<&str>,
+        own_globals: Option<Map<String, Value>>,
+        expose_env: Option<&Vec<String>>,
+        host_execution_id: Option<&str>,
+        flow_deadline: Option<std::time::Instant>,
+    ) -> SharedCtx {
+        RuntimeCtx::prepare(
+            parent,
+            None,
+            input,
+            flow_id,
+            own_globals,
+            expose_env,
+            host_execution_id,
+            flow_deadline,
+        )
+    }
+
+    /// The shared construction path. `link` overrides the context reachable
+    /// as `$PARENT` (`None` = the seeded parent); child_isolated passes an
+    /// empty ambient execution for reference-node isolation.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        parent: Option<&SharedCtx>,
+        link: Option<SharedCtx>,
         input: Value,
         flow_id: Option<&str>,
         own_globals: Option<Map<String, Value>>,
@@ -232,7 +292,10 @@ impl RuntimeCtx {
                 }
             }
         }
-        ctx.parent = parent.cloned();
+        ctx.parent = match link {
+            Some(l) => Some(l),
+            None => parent.cloned(),
+        };
         ctx.flow_deadline = flow_deadline.or_else(|| parent.and_then(|p| p.flow_deadline));
         ctx.shared()
     }
@@ -455,6 +518,44 @@ mod tests {
         );
         // undeclared exposeEnv inherits the parent's (empty) env
         assert_eq!(eval_str("$ENV", &*inner).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn child_isolated_reference_isolation() {
+        // plaita-go#80 r78 golden（ref_parent_isolation / ref_global_inherit）
+        // 的 Rust 侧钉：reference 子流程继承 $GLOBAL/$ENV 与执行身份，但
+        // $PARENT 链接指向空 ambient 执行——父的任何根都读不到（未知根求值
+        // null），父状态零泄漏。
+        let parent = RuntimeCtx::root();
+        parent.set_node_result("n", json!("parent-node"));
+        parent.set_global("token", json!("top-token"));
+        let flow = crate::model::Flow {
+            id: "sub".into(),
+            name: String::new(),
+            desc: String::new(),
+            runtime: String::new(),
+            version: String::new(),
+            nodes: Vec::new(),
+            timeout: None,
+            input_type: None,
+            output_type: None,
+            timeout_handler: Default::default(),
+            metadata: Value::Null,
+            context: Default::default(),
+            expose_env: None,
+        };
+        let child = RuntimeCtx::child_isolated(&parent, json!({"z": 9}), "sub", &flow, None);
+        // $GLOBAL 继承；执行身份继承
+        assert_eq!(
+            eval_str("$GLOBAL.token", &*child).unwrap(),
+            json!("top-token")
+        );
+        assert_eq!(eval_str("$GLOBAL.flow_id", &*child).unwrap(), json!("sub"));
+        // $PARENT 隔离：未知根 → null；已知根也读不到父的值（ambient 空）
+        assert_eq!(eval_str("$PARENT.n", &*child).unwrap(), json!(null));
+        assert_eq!(eval_str("$PARENT.$NODE.n", &*child).unwrap(), json!(null));
+        // 自身 $INPUT 正常
+        assert_eq!(eval_str("$INPUT.z", &*child).unwrap(), json!(9));
     }
 
     #[test]

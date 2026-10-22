@@ -68,6 +68,86 @@ pub fn execute_node_body(
             host,
             deadline,
         ),
+        NodeKind::Map {
+            collection,
+            item_type,
+            concurrent,
+            max_concurrent,
+            child_flow,
+        } => execute_map(
+            node,
+            collection,
+            item_type.as_ref(),
+            *concurrent,
+            *max_concurrent,
+            child_flow,
+            rc,
+            host,
+            deadline,
+        ),
+        NodeKind::Filter {
+            collection,
+            item_type,
+            child_flow,
+        } => execute_filter(
+            node,
+            collection,
+            item_type.as_ref(),
+            child_flow,
+            rc,
+            host,
+            deadline,
+        ),
+        NodeKind::Find {
+            collection,
+            item_type,
+            child_flow,
+        } => execute_find(
+            node,
+            collection,
+            item_type.as_ref(),
+            child_flow,
+            rc,
+            host,
+            deadline,
+        ),
+        NodeKind::Reduce {
+            collection,
+            item_type,
+            initial,
+            child_flow,
+        } => execute_reduce(
+            node,
+            collection,
+            item_type.as_ref(),
+            initial.as_ref(),
+            child_flow,
+            rc,
+            host,
+            deadline,
+        ),
+        NodeKind::While {
+            condition,
+            max_iterations,
+            child_flow,
+        } => execute_while(
+            node,
+            condition.as_ref(),
+            *max_iterations,
+            child_flow,
+            rc,
+            host,
+            deadline,
+        ),
+        NodeKind::Mock { value } => Ok(StepOutcome {
+            // plaita mock.py：value 原样透传不求值（pin 语义即字面固定），
+            // output 字段忽略（golden mock_output_ignored 钉）。
+            result: value.clone().unwrap_or(Value::Null),
+            next: node.next.clone(),
+        }),
+        NodeKind::Reference { child_flow, input } => {
+            execute_reference(node, child_flow, input.as_ref(), rc, host, deadline)
+        }
         NodeKind::Parallel {
             branches,
             is_conditional,
@@ -372,6 +452,84 @@ fn coerce_loop_collection(v: &Value) -> Result<Vec<Value>, NodeError> {
     }
 }
 
+/// loop 家族共享：求值 `collection` 字段并 coerce 成元素列表。
+fn eval_collection_elements(
+    node: &Node,
+    collection: &Collection,
+    rc: &SharedCtx,
+    what: &str,
+) -> Result<Vec<Value>, NodeError> {
+    match collection {
+        Collection::Array(a) => Ok(a.clone()),
+        Collection::Expr(expr) => {
+            let v = eval_value(node, what, &Value::String(expr.clone()), rc).map_err(|e| {
+                NodeError::transient(format!(
+                    "load {what} collection elements error: {}",
+                    e.message
+                ))
+            })?;
+            coerce_loop_collection(&v)
+        }
+    }
+}
+
+/// loop 家族共享：一轮子流程执行——子流程的 `$INPUT` 只含注入形状
+/// （{item,index} / {first,second} / 位置数组），`$PARENT` 是调用方执行；
+/// 节点内部零 try/except，子流程错误直接冒泡交引擎按策略分流。
+fn run_collection_child(
+    child_flow: &Flow,
+    input: Value,
+    rc: &SharedCtx,
+    host: &Host,
+    deadline: Option<Instant>,
+) -> Result<Value, NodeError> {
+    let child_rc = RuntimeCtx::child(rc, input.clone(), &child_flow.id, child_flow, deadline);
+    child_flow
+        .execute_on(&child_rc, host, &input)
+        .map_err(|e| NodeError::transient(e.to_string()))
+}
+
+/// loop 家族共享的输出尾（Go collectionExecuteResult 同形）：无显式 output →
+/// 计算出的集合值本身就是节点结果（下游 $NODE.<id>）；否则求值 output 并按
+/// outputType 校验。
+fn collection_result_tail(
+    node: &Node,
+    result: Value,
+    rc: &SharedCtx,
+) -> Result<StepOutcome, NodeError> {
+    if node.output.is_none() {
+        return Ok(StepOutcome {
+            result,
+            next: node.next.clone(),
+        });
+    }
+    let output = eval_value(node, "output", node.output.as_ref().unwrap(), rc)?;
+    validate_output(node, "output", &output)?;
+    Ok(StepOutcome {
+        result: output,
+        next: node.next.clone(),
+    })
+}
+
+/// 字面量数组的 itemType 闸（Go checkCollectionItem 同形）：只在 collection
+/// 是字面量数组且声明了 itemType 时生效（编译器产出的 collection 恒为表达式，
+/// 这是手写 flow 的护栏，家族统一）。
+fn check_collection_item(
+    collection: &Collection,
+    item_type: Option<&crate::property::Property>,
+    node_type: &str,
+    item: &Value,
+) -> Result<(), NodeError> {
+    if let (Collection::Array(_), Some(it)) = (collection, item_type) {
+        if it.validate_value(item).is_err() {
+            return Err(NodeError::transient(format!(
+                "invalid {node_type} item value: {item}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_loop(
     node: &Node,
@@ -383,40 +541,18 @@ fn execute_loop(
     host: &Host,
     deadline: Option<Instant>,
 ) -> Result<StepOutcome, NodeError> {
-    let elements: Vec<Value> = match collection {
-        Collection::Array(a) => a.clone(),
-        Collection::Expr(expr) => {
-            let v = eval_value(node, "loop collection", &Value::String(expr.clone()), rc).map_err(
-                |e| {
-                    NodeError::transient(format!(
-                        "load loop collection elements error: {}",
-                        e.message
-                    ))
-                },
-            )?;
-            coerce_loop_collection(&v)?
-        }
-    };
+    let elements = eval_collection_elements(node, collection, rc, "loop")?;
 
     let cond = Condition::from_value(condition.unwrap_or(&Value::Null));
     let mut last_result: Value = Value::Null;
     for (index, item) in elements.iter().enumerate() {
-        if let (Collection::Array(_), Some(it)) = (collection, item_type) {
-            if it.validate_value(item).is_err() {
-                return Err(NodeError::transient(format!(
-                    "invalid loop item value: {item}"
-                )));
-            }
-        }
+        check_collection_item(collection, item_type, "loop", item)?;
         rc.set_current(LOOP_INDEX_KEY, json!(index));
         rc.set_current(LOOP_ITEM_KEY, item.clone());
 
         // Run the child flow with the current item and index
         let input = json!({"item": item, "index": index});
-        let child_rc = RuntimeCtx::child(rc, input.clone(), &child_flow.id, child_flow, deadline);
-        let child_result = child_flow
-            .execute_on(&child_rc, host, &input)
-            .map_err(|e| NodeError::transient(e.to_string()))?;
+        let child_result = run_collection_child(child_flow, input, rc, host, deadline)?;
         rc.set_current(LOOP_RESULT_KEY, child_result.clone());
         last_result = child_result;
 
@@ -428,18 +564,302 @@ fn execute_loop(
         }
     }
 
-    if node.output.is_none() {
-        // plaita semantics: the loop node's output is the last child result
-        // ($NODE.<loop>), nil when the collection was empty
-        return Ok(StepOutcome {
-            result: last_result,
-            next: node.next.clone(),
-        });
+    collection_result_tail(node, last_result, rc)
+}
+
+// -- map / filter / find / reduce（loop.py 集合并五类，plaita-go#80 对齐）----
+
+#[allow(clippy::too_many_arguments)]
+fn execute_map(
+    node: &Node,
+    collection: &Collection,
+    item_type: Option<&crate::property::Property>,
+    concurrent: bool,
+    max_concurrent: Option<i64>,
+    child_flow: &Flow,
+    rc: &SharedCtx,
+    host: &Host,
+    deadline: Option<Instant>,
+) -> Result<StepOutcome, NodeError> {
+    let elements = eval_collection_elements(node, collection, rc, "map")?;
+    let mut results: Vec<Value> = vec![Value::Null; elements.len()];
+
+    // Python `_build_executor`：concurrent=True 且已在共享池 worker 线程上时
+    // 降级串行（向同一池再提交会 starving 死锁）——plaita-go#80 同款守卫。
+    if concurrent && !elements.is_empty() && !in_branch_pool() {
+        execute_map_concurrent(
+            collection,
+            item_type,
+            max_concurrent,
+            child_flow,
+            &elements,
+            &mut results,
+            rc,
+            host,
+            deadline,
+        )?;
+    } else {
+        for (index, item) in elements.iter().enumerate() {
+            check_collection_item(collection, item_type, "map", item)?;
+            let input = json!({"item": item, "index": index});
+            results[index] = run_collection_child(child_flow, input, rc, host, deadline)?;
+        }
     }
-    let output = eval_value(node, "loop output", node.output.as_ref().unwrap(), rc)?;
-    validate_output(node, "output", &output)?;
+
+    collection_result_tail(node, Value::Array(results), rc)
+}
+
+/// Python ThreadParallelExecutor 的对应物：共享池 worker 数 = 进程级分支
+/// 许可池（缺省 8，`PLAITA_BG_THREAD_WORKERS` 可调，r7 对齐面）；显式
+/// `maxConcurrent`（Python `max_workers`）给定时用同款 semaphore gate——
+/// 缺省/0/negative 都按 Python `or None` 语义回落池宽。结果按集合顺序落位；
+/// 错误取最小失败下标（ThreadPoolExecutor.map 按序产出，最早失败先冒泡）。
+#[allow(clippy::too_many_arguments)]
+fn execute_map_concurrent(
+    collection: &Collection,
+    item_type: Option<&crate::property::Property>,
+    max_concurrent: Option<i64>,
+    child_flow: &Flow,
+    elements: &[Value],
+    results: &mut [Value],
+    rc: &SharedCtx,
+    host: &Host,
+    deadline: Option<Instant>,
+) -> Result<(), NodeError> {
+    let gate: usize = match max_concurrent {
+        Some(n) if n > 0 => (n as usize).min(elements.len()),
+        _ => branch_permits().max,
+    };
+    let next_index = std::sync::atomic::AtomicUsize::new(0);
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<Value, String>)>();
+    let next_index = &next_index;
+    std::thread::scope(|scope| {
+        for _ in 0..gate {
+            let tx = tx.clone();
+            scope.spawn(move || loop {
+                let index = next_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if index >= elements.len() {
+                    break;
+                }
+                IN_BRANCH_POOL.with(|c| c.set(true));
+                let outcome = (|| -> Result<Value, NodeError> {
+                    let item = &elements[index];
+                    check_collection_item(collection, item_type, "map", item)?;
+                    let input = json!({"item": item, "index": index});
+                    run_collection_child(child_flow, input, rc, host, deadline)
+                })();
+                IN_BRANCH_POOL.with(|c| c.set(false));
+                let _ = tx.send((index, outcome.map_err(|e| e.to_string())));
+            });
+        }
+    });
+    drop(tx);
+    // 最小失败下标先冒泡（Python map 的按序语义）。
+    let mut errs: Vec<Option<String>> = vec![None; elements.len()];
+    for (index, outcome) in rx {
+        match outcome {
+            Ok(v) => results[index] = v,
+            Err(e) => errs[index] = Some(e),
+        }
+    }
+    if let Some(err) = errs.into_iter().flatten().next() {
+        return Err(NodeError::transient(err));
+    }
+    Ok(())
+}
+
+fn execute_filter(
+    node: &Node,
+    collection: &Collection,
+    item_type: Option<&crate::property::Property>,
+    child_flow: &Flow,
+    rc: &SharedCtx,
+    host: &Host,
+    deadline: Option<Instant>,
+) -> Result<StepOutcome, NodeError> {
+    let elements = eval_collection_elements(node, collection, rc, "filter")?;
+    let mut results: Vec<Value> = Vec::new();
+    for (index, item) in elements.iter().enumerate() {
+        check_collection_item(collection, item_type, "filter", item)?;
+        let input = json!({"item": item, "index": index});
+        let result = run_collection_child(child_flow, input, rc, host, deadline)?;
+        if plaita_expression::truthy(&result) {
+            results.push(item.clone());
+        }
+    }
+    collection_result_tail(node, Value::Array(results), rc)
+}
+
+fn execute_find(
+    node: &Node,
+    collection: &Collection,
+    item_type: Option<&crate::property::Property>,
+    child_flow: &Flow,
+    rc: &SharedCtx,
+    host: &Host,
+    deadline: Option<Instant>,
+) -> Result<StepOutcome, NodeError> {
+    let elements = eval_collection_elements(node, collection, rc, "find")?;
+    for (index, item) in elements.iter().enumerate() {
+        check_collection_item(collection, item_type, "find", item)?;
+        let input = json!({"item": item, "index": index});
+        let result = run_collection_child(child_flow, input, rc, host, deadline)?;
+        if plaita_expression::truthy(&result) {
+            return collection_result_tail(node, item.clone(), rc);
+        }
+    }
+    // 无真值元素 → None（Python 返回 None）。
+    collection_result_tail(node, Value::Null, rc)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_reduce(
+    node: &Node,
+    collection: &Collection,
+    item_type: Option<&crate::property::Property>,
+    initial: Option<&Value>,
+    child_flow: &Flow,
+    rc: &SharedCtx,
+    host: &Host,
+    deadline: Option<Instant>,
+) -> Result<StepOutcome, NodeError> {
+    let elements = eval_collection_elements(node, collection, rc, "reduce")?;
+
+    // 累积链（plaita loop.py Reduce）：initial 缺省 → 首元素作初值、从第二个
+    // 元素开始；JSON null 视同缺省（Python `self.initial is not None` 判据）。
+    // 空集合且无 initial → Python collection[0] 的 IndexError（确定性错误，
+    // 不重试）；空集合但有 initial → 返回 initial。
+    let (mut acc, items): (Value, &[Value]) = match initial {
+        Some(expr) => {
+            let v = eval_value(node, "reduce initial", expr, rc).map_err(|e| {
+                NodeError::transient(format!("eval reduce initial error: {}", e.message))
+            })?;
+            (v, &elements[..])
+        }
+        None => match elements.split_first() {
+            Some((first, rest)) => (first.clone(), rest),
+            None => return Err(NodeError::deterministic(
+                "reduce on empty collection without initial: IndexError: list index out of range",
+            )),
+        },
+    };
+
+    // 子流程输入两形态（plaita _child_is_array_input）：子流程
+    // inputType.dataType == "array" → 位置参数 [acc, item]（@flow 编译器固定
+    // 产此形态）；否则 object {first, second}。不注入 index。
+    let array_input = child_flow
+        .input_type
+        .as_ref()
+        .and_then(|p| p.data_type)
+        .map(|d| d == crate::property::DataType::Array)
+        .unwrap_or(false);
+    for item in items {
+        check_collection_item(collection, item_type, "reduce", item)?;
+        let input = if array_input {
+            json!([acc, item])
+        } else {
+            json!({"first": acc, "second": item})
+        };
+        acc = run_collection_child(child_flow, input, rc, host, deadline)?;
+    }
+
+    collection_result_tail(node, acc, rc)
+}
+
+/// loop.py While（条件循环）：先判断后执行——条件满足才继续下一轮。条件
+/// 上下文可见 $LOOP-ITEM（上一轮子流程结果，首轮 None）与 $LOOP-INDEX（当前
+/// 轮次，从 0 起）——Python While **不**注入 $LOOP-RESULT（Loop 专属）。
+/// condition 缺省/null → Python condition=None：只执行一轮。
+/// max_iterations 缺省 1000，触顶仅告警不报错（Python _logger.warning 同款，
+/// 且只有真正跑满的循环才报——0/负上限零轮静默）。
+#[allow(clippy::too_many_arguments)]
+fn execute_while(
+    node: &Node,
+    condition: Option<&Value>,
+    max_iterations: Option<i64>,
+    child_flow: &Flow,
+    rc: &SharedCtx,
+    host: &Host,
+    deadline: Option<Instant>,
+) -> Result<StepOutcome, NodeError> {
+    let max_it = max_iterations.unwrap_or(1000);
+    let cond = Condition::from_value(condition.unwrap_or(&Value::Null));
+    let single_round = condition.is_none();
+    let mut index: i64 = 0;
+    let mut result: Value = Value::Null;
+    let mut stopped_by_limit = false;
+    while index < max_it {
+        if single_round && index > 0 {
+            break;
+        }
+        rc.set_current(LOOP_ITEM_KEY, result.clone());
+        rc.set_current(LOOP_INDEX_KEY, json!(index));
+        let (matched, _) = cond.match_context(rc)?;
+        if !matched {
+            break;
+        }
+        let input = json!({"item": result, "index": index});
+        result = run_collection_child(child_flow, input, rc, host, deadline)?;
+        index += 1;
+        stopped_by_limit = index >= max_it;
+    }
+    if stopped_by_limit {
+        eprintln!(
+            "while 节点 {:?} 达到 max_iterations={max_it} 上限，已强制停止",
+            node.id
+        );
+    }
+    collection_result_tail(node, result, rc)
+}
+
+// -- reference ----------------------------------------------------------------
+
+/// child.py ReferenceFlow（引用逻辑）：childFlow 已由 FlowProvider 在装载期
+/// 注入。子流程隔离父上下文——`$PARENT.<x>` 求值为 null（隔离是实测口径），
+/// `$GLOBAL`/`$ENV` 与执行身份继承调用方；input 缺省（求值 None）→ 子流程
+/// 继承调用方 $INPUT（golden ref_no_input_inherits_caller 钉）。
+fn execute_reference(
+    node: &Node,
+    child_flow: &Flow,
+    input: Option<&Value>,
+    rc: &SharedCtx,
+    host: &Host,
+    deadline: Option<Instant>,
+) -> Result<StepOutcome, NodeError> {
+    let input = match input {
+        Some(v) => eval_value(node, "reference input", v, rc).map_err(|e| {
+            NodeError::transient(format!(
+                "failed to evaluate input for reference node: {}",
+                e.message
+            ))
+        })?,
+        None => rc
+            .snapshot_json()
+            .get("input")
+            .cloned()
+            .unwrap_or(Value::Null),
+    };
+    if let Some(it) = &child_flow.input_type {
+        it.validate_value(&input).map_err(|e| {
+            NodeError::transient(format!(
+                "failed to validate input for children workflow ({:?}): {e}",
+                child_flow.id
+            ))
+        })?;
+    }
+    let child_rc =
+        RuntimeCtx::child_isolated(rc, input.clone(), &child_flow.id, child_flow, deadline);
+    let result = child_flow
+        .execute_on(&child_rc, host, &input)
+        .map_err(|e| {
+            NodeError::transient(format!(
+                "failed to exec children workflow ({:?}) : {e}",
+                child_flow.id
+            ))
+        })?;
+    validate_output(node, "reference output", &result)?;
     Ok(StepOutcome {
-        result: output,
+        result,
         next: node.next.clone(),
     })
 }

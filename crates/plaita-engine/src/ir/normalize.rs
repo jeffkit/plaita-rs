@@ -28,6 +28,9 @@ use crate::ir::support::{
 use crate::ir::{scope::Scope, validate};
 
 /// Node type accept-list (strict, fail-closed): types this engine implements.
+/// 集合并五类 + case/mock/reference 的转正对齐 plaita-go#80 phase 1+2
+/// （权威语义 = plaita/node/loop.py + decide.py SwitchLegacy + mock.py +
+/// child.py ReferenceFlow；golden 对拍 tests/node_parity_golden.rs）。
 pub const SUPPORTED_NODE_TYPES: &[&str] = &[
     "start",
     "end",
@@ -39,38 +42,32 @@ pub const SUPPORTED_NODE_TYPES: &[&str] = &[
     "child",
     "http",
     "code",
+    "map",
+    "filter",
+    "find",
+    "reduce",
+    "while",
+    "case",
+    "mock",
+    "reference",
     // The remainder of plaita-go's accept list is NOT implemented by
     // plaita-rs yet; each gets a targeted hint in KNOWN_UNSUPPORTED.
 ];
 
 /// plaita-go's accept-list entries plaita-rs has not ported, with hints.
+/// 两大留白族：挂起型（event/hitl_await/server 五类——等待/恢复全在引擎外，
+/// 本引擎无 suspend/resume 架构，实装=先建执行架构）与外部宿主族
+/// （agentrun + plaita-nodes——需要 agentproc/凭据/服务商基础设施）。
 pub const KNOWN_UNSUPPORTED: &[(&str, &str)] = &[
     (
-        "map",
-        "collection variant, not ported yet (base loop is supported)",
+        "calculate",
+        "unRecognized node type: calculate — plaita does not register this type \
+         (the module is a leftover; the flow must not load here either)",
     ),
     (
-        "filter",
-        "collection variant, not ported yet (base loop is supported)",
-    ),
-    (
-        "find",
-        "collection variant, not ported yet (base loop is supported)",
-    ),
-    (
-        "reduce",
-        "collection variant, not ported yet (base loop is supported)",
-    ),
-    (
-        "while",
-        "condition loop variant, not ported yet (base loop is supported)",
-    ),
-    ("case", "legacy switch dialect, use switch"),
-    ("calculate", "calculate node is not ported yet"),
-    ("mock", "mock node is not ported yet"),
-    (
-        "reference",
-        "provider-based child flow reference is not ported yet (use inline childFlow)",
+        "ignore",
+        "unRecognized node type: ignore — plaita does not register this type \
+         (it is a Node base-class placeholder, not a deployable node)",
     ),
     ("sleep", "sleep node is not part of the plaita dialect"),
     ("trpc", "internal RPC node was removed from this engine"),
@@ -142,11 +139,50 @@ pub const KNOWN_UNSUPPORTED: &[(&str, &str)] = &[
     ("hitl", "hitl node is not ported by plaita-rs yet"),
     (
         "event",
-        "event node (suspending) is not ported by plaita-rs yet",
+        "event node (suspending) is not ported by plaita-rs yet: the wait/resume \
+         cycle lives outside the engine (subscription store + resume events); \
+         this engine has no suspend/resume architecture",
     ),
     (
         "hitl_await",
-        "hitl_await node (suspending) is not ported by plaita-rs yet",
+        "hitl_await node (suspending) is not ported by plaita-rs yet: the wait/resume \
+         cycle lives outside the engine (subscription store + resume events); \
+         this engine has no suspend/resume architecture",
+    ),
+    (
+        "delay",
+        "delay node (server extension, suspending) is not ported by plaita-rs yet: \
+         scheduling/consume services are deployment-side facilities and this engine \
+         has no suspend/resume architecture",
+    ),
+    (
+        "approval",
+        "approval node (server extension, suspending) is not ported by plaita-rs yet: \
+         the approval service is a deployment-side facility and this engine has no \
+         suspend/resume architecture",
+    ),
+    (
+        "redis_queue",
+        "redis_queue node (server extension, suspending) is not ported by plaita-rs yet: \
+         the queue consumer is a deployment-side facility and this engine has no \
+         suspend/resume architecture",
+    ),
+    (
+        "kafka_queue",
+        "kafka_queue node (server extension, suspending) is not ported by plaita-rs yet: \
+         the queue consumer is a deployment-side facility and this engine has no \
+         suspend/resume architecture",
+    ),
+    (
+        "http_callback",
+        "http_callback node (server extension, suspending) is not ported by plaita-rs yet: \
+         the callback ingress is a deployment-side facility and this engine has no \
+         suspend/resume architecture",
+    ),
+    (
+        "sql_query",
+        "sql_query node is not ported by plaita-rs yet (driver selection + credential \
+         store are prerequisites; see plaita-go#84 for the same evaluation)",
     ),
 ];
 
@@ -186,7 +222,27 @@ const NODE_FIELD_ALIASES: &[(&str, &str)] = &[
     ("waitReply", "wait_reply"),
 ];
 
+/// Caps reference-chain resolution (a cycle must fail the load with a named
+/// error, not recurse forever) — plaita-go#80 phase 2 同款上限。
+const MAX_REFERENCE_RESOLVE_DEPTH: u32 = 32;
+
+/// Carries the optional [`crate::ir::FlowProvider`] through normalization;
+/// `depth` counts open reference resolutions along the current chain
+/// (diamonds don't accumulate — only the active chain counts, as in Go).
+pub(crate) struct FlowResolver<'a> {
+    pub provider: &'a dyn crate::ir::FlowProvider,
+}
+
 pub fn normalize_doc(doc: &mut Value, scope: Scope) -> Result<(), String> {
+    normalize_doc_with(doc, scope, None, 0)
+}
+
+pub fn normalize_doc_with(
+    doc: &mut Value,
+    scope: Scope,
+    resolver: Option<&FlowResolver>,
+    depth: u32,
+) -> Result<(), String> {
     let Some(doc_obj) = doc.as_object_mut() else {
         return Err("ir: flow document must be an object".to_string());
     };
@@ -267,13 +323,13 @@ pub fn normalize_doc(doc: &mut Value, scope: Scope) -> Result<(), String> {
                 "ir: flow {flow_id:?}: nodes[] entry is not an object"
             ));
         };
-        normalize_node(n).map_err(|e| {
+        normalize_node(n, resolver, depth).map_err(|e| {
             format!(
                 "ir: flow {flow_id:?}: node {:?}: {e}",
                 n.get("id").and_then(|v| v.as_str()).unwrap_or("?")
             )
         })?;
-        normalize_embedded(&flow_id, raw)?;
+        normalize_embedded(&flow_id, raw, resolver, depth)?;
     }
 
     validate::validate_doc(doc, scope).map_err(|e| e.to_string())?;
@@ -285,7 +341,12 @@ pub fn normalize_doc(doc: &mut Value, scope: Scope) -> Result<(), String> {
 /// Recursively normalizes + validates the flow documents embedded in
 /// loop/child/parallel nodes. The engine requires a non-blank workflow id,
 /// which plaita's embedded flows never carry — one is synthesized.
-fn normalize_embedded(flow_id: &str, node: &mut Value) -> Result<(), String> {
+fn normalize_embedded(
+    flow_id: &str,
+    node: &mut Value,
+    resolver: Option<&FlowResolver>,
+    depth: u32,
+) -> Result<(), String> {
     let node_obj = match node.as_object_mut() {
         Some(o) => o,
         None => return Ok(()),
@@ -301,12 +362,12 @@ fn normalize_embedded(flow_id: &str, node: &mut Value) -> Result<(), String> {
         if get_str(sub_obj, &["id"]).unwrap_or_default().is_empty() {
             sub_obj.insert("id".into(), Value::String(format!("{node_id}.{name}")));
         }
-        normalize_doc(sub, Scope::Child)
+        normalize_doc_with(sub, Scope::Child, resolver, depth)
             .map_err(|e| format!("ir: flow {flow_id:?}: node {node_id:?} {name}: {e}"))
     };
 
     match node_type.as_str() {
-        "loop" | "child" => {
+        "loop" | "child" | "map" | "filter" | "find" | "reduce" | "while" | "reference" => {
             if node_obj.contains_key("childFlow") {
                 embed(node_obj.get_mut("childFlow"), "childFlow")?;
             }
@@ -335,7 +396,11 @@ fn normalize_embedded(flow_id: &str, node: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
-fn normalize_node(n: &mut Map<String, Value>) -> Result<(), String> {
+fn normalize_node(
+    n: &mut Map<String, Value>,
+    resolver: Option<&FlowResolver>,
+    depth: u32,
+) -> Result<(), String> {
     let node_type = get_str(n, &["type"]).unwrap_or_default().to_string();
     if node_type.is_empty() {
         return Err("missing type".to_string());
@@ -388,7 +453,12 @@ fn normalize_node(n: &mut Map<String, Value>) -> Result<(), String> {
         "if" => translate_if(n),
         "parallel" => translate_parallel(n),
         "loop" => translate_loop(n),
+        "map" | "filter" | "find" | "reduce" => translate_collection(n, &node_type),
+        "while" => translate_while(n),
         "child" => translate_child(n),
+        "case" => translate_case(n),
+        "mock" => Ok(()),
+        "reference" => translate_reference(n, resolver, depth),
         "http" => translate_http(n),
         "code" => translate_code(n),
         "end" => translate_end(n),
@@ -555,6 +625,7 @@ fn translate_loop(n: &mut Map<String, Value>) -> Result<(), String> {
         }
     }
     fold_key(n, "item_type", "itemType");
+    fold_key(n, "typeDefs", "itemType");
     Ok(())
 }
 
@@ -570,6 +641,305 @@ fn translate_child(n: &mut Map<String, Value>) -> Result<(), String> {
         }
     }
     Err("child node requires an inline childFlow document".to_string())
+}
+
+/// loop.py BaseCollectionNode 家族（map/filter/find/reduce）共享的装载面：
+/// itemType 归一化 + camel 别名折叠（loop 同款），map 另有 concurrent
+/// （历史别名 async，Python `_normalize_concurrent`：concurrent 真值保留，
+/// 否则取 bool(async)）与 maxConcurrent。类型错误具名拒（#9 卫生）。
+fn translate_collection(n: &mut Map<String, Value>, node_type: &str) -> Result<(), String> {
+    if let Some(v) = n.get_mut("itemType") {
+        if v.is_object() {
+            normalize_property(v).map_err(|e| format!("itemType: {e}"))?;
+        }
+    }
+    fold_key(n, "item_type", "itemType");
+    // typeDefs 是 BaseCollectionNode 的遗留别名（Python _setup_item_type）。
+    fold_key(n, "typeDefs", "itemType");
+
+    let want_bool = |m: &Map<String, Value>, k: &str| -> Result<Option<bool>, String> {
+        match m.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(other) => Err(format!(
+                "field {k:?} must be a boolean, got {}",
+                type_name(other)
+            )),
+        }
+    };
+    if node_type == "map" {
+        // Python `_normalize_concurrent`: concurrent 真值优先，否则 async 兜底。
+        let concurrent = want_bool(n, "concurrent")?.unwrap_or(false);
+        let legacy_async = want_bool(n, "async")?.unwrap_or(false);
+        n.remove("async");
+        if concurrent || legacy_async {
+            n.insert("concurrent".into(), Value::Bool(true));
+        } else {
+            n.remove("concurrent");
+        }
+        match n.get("maxConcurrent") {
+            None | Some(Value::Null) => {}
+            Some(Value::Number(num)) if num.is_i64() || num.is_u64() => {
+                // 负数装载期拒绝（Python 到线程池构造期才 ValueError，前置到
+                // Load；Go translateCollection 同款）。0 = 不设限（`or None`）。
+                if let Some(v) = num.as_i64() {
+                    if v < 0 {
+                        return Err(format!(
+                            "maxConcurrent must be >= 0 (0 = unbounded), got {v}"
+                        ));
+                    }
+                }
+            }
+            Some(other) => {
+                return Err(format!(
+                    "field \"maxConcurrent\" must be an integer, got {}",
+                    type_name(other)
+                ))
+            }
+        }
+        fold_key(n, "max_concurrent", "maxConcurrent");
+    }
+    Ok(())
+}
+
+fn translate_while(n: &mut Map<String, Value>) -> Result<(), String> {
+    // 部署 IR 双拼写都收：编译器 _compile_while 产 snake 的
+    // child_flow/max_iterations，console 正典产 camel（plaita#89 dual-read）。
+    fold_key(n, "child_flow", "childFlow");
+    fold_key(n, "maxIterations", "max_iterations");
+    match n.get("max_iterations") {
+        None | Some(Value::Null) => {}
+        Some(Value::Number(num)) if num.is_i64() || num.is_u64() => {}
+        Some(other) => {
+            return Err(format!(
+                "field \"max_iterations\" must be an integer, got {}",
+                type_name(other)
+            ))
+        }
+    }
+    // condition 形状 fail-closed 同 if：畸形 condition 在 Python 里解析失败后
+    // 永不命中、零轮静默 None（decide.py 自认的缺陷形态），这里加载期拒绝；
+    // 缺省/null 合法（Python condition=None：只执行一轮）。
+    if let Some(v) = n.get("condition").cloned() {
+        if !v.is_null() {
+            let Some(c) = v.as_object() else {
+                return Err(
+                    "while condition must be an object ({field,operator,value} or \
+                            {relation,conditions}), got non-object"
+                        .to_string(),
+                );
+            };
+            let has_field = c.contains_key("field");
+            let has_operator = c.contains_key("operator");
+            let has_value = c.contains_key("value");
+            let conditions_len = c
+                .get("conditions")
+                .and_then(|x| x.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let has_relation = c.contains_key("relation");
+            if has_field && has_operator && has_value {
+                // 单条件（value 允许 null：eq/null 比较是合法形状）。
+            } else if has_relation && conditions_len > 0 {
+                let mut cv = v.clone();
+                normalize_condition(&mut cv).map_err(|e| format!("while condition: {e}"))?;
+                n.insert("condition".into(), cv);
+            } else {
+                return Err(
+                    "while condition is malformed: needs {field,operator,value} or \
+                     {relation,conditions[>0]}; a malformed condition would silently run \
+                     zero rounds"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 转正 plaita 的 case 节点（decide.py SwitchLegacy，等值匹配方言）。Python
+/// 在模型校验期把它脱糖成普通 Switch：每条 case 变成
+/// Branch(name=case.id, condition={field:target, operator:eq, value:case.value},
+/// next=case.id)，外加恒置 isDefault 的兜底分支；本函数在 IR 归一化层做同款
+/// 脱糖（节点 type 改写为 switch + 构造 branches，metadata 记 caseDialect 留
+/// 痕），命中/输出语义与 switch 完全一致。拍板依据（plaita-go#80 r78 Python
+/// 探针 + node_parity2 golden）：
+///
+///   - cases[].id 必填 = 跳转目标（Python Branch(next=case["id"]) 硬编码 id，
+///     cases[].next 不参与路由）；cases[].value 必填（null 合法，eq None
+///     比较）；cases[].name 可选 = label。
+///   - default 缺省或 null → 字面 "default" 节点 id；非空字符串 → 该 id。
+///   - target 必须是表达式字符串或缺省：缺省/None 时条件恒 None，只有
+///     value:null 的 case 可命中——desugar 以引擎的 $NULL 字面量承载；字面量
+///     target 加载期拒绝（Python evaluate(字面量) 语义无部署意义）。
+///   - cases 必须是数组；条目缺 id/value 加载期拒绝；空 cases 合法（只剩
+///     兜底分支）。
+fn translate_case(n: &mut Map<String, Value>) -> Result<(), String> {
+    let target = match n.get("target") {
+        None | Some(Value::Null) => Value::String("$NULL".into()),
+        Some(v @ Value::String(_)) => v.clone(),
+        Some(other) => {
+            return Err(format!(
+                "case target must be an expression string (or absent), got {}",
+                type_name(other)
+            ))
+        }
+    };
+    let raw_cases: Vec<Value> = match n.get("cases") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) => a.clone(),
+        Some(other) => return Err(format!("cases must be an array, got {}", type_name(other))),
+    };
+    let mut branches: Vec<Value> = Vec::with_capacity(raw_cases.len() + 1);
+    for (i, rc) in raw_cases.iter().enumerate() {
+        let Some(c) = rc.as_object() else {
+            return Err(format!(
+                "cases[{i}] is not an object (got {}) — every case needs id/value, optional name",
+                type_name(rc)
+            ));
+        };
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty() {
+            return Err(format!(
+                "cases[{i}] missing required \"id\" (the jump target) — every case needs \
+                 id/value, optional name"
+            ));
+        }
+        let Some(value) = c.get("value") else {
+            return Err(format!("cases[{i}] ({id:?}) missing required \"value\""));
+        };
+        let mut b = Map::new();
+        b.insert("name".into(), Value::String(id.to_string()));
+        b.insert(
+            "condition".into(),
+            serde_json::json!({
+                "field": target,
+                "operator": "eq",
+                "value": value,
+            }),
+        );
+        b.insert("next".into(), Value::String(id.to_string()));
+        if let Some(Value::String(name)) = c
+            .get("name")
+            .filter(|s| !s.as_str().unwrap_or("").is_empty())
+        {
+            b.insert("label".into(), Value::String(name.clone()));
+        }
+        branches.push(Value::Object(b));
+    }
+    let default_next = match n.get("default") {
+        None | Some(Value::Null) => "default".to_string(),
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(other) => {
+            return Err(format!(
+                "default must be a node id string, got {}",
+                type_name(other)
+            ))
+        }
+    };
+    branches.push(serde_json::json!({
+        "name": "default",
+        "next": default_next,
+        "isDefault": true,
+    }));
+    n.insert("type".into(), Value::String("switch".into()));
+    n.insert("branches".into(), Value::Array(branches));
+    n.remove("target");
+    n.remove("cases");
+    n.remove("default");
+    let mut meta = as_meta(n);
+    stash_into(
+        &mut meta,
+        "caseDialect",
+        Value::String("desugared-to-switch".into()),
+    );
+    n.insert("metadata".into(), Value::Object(meta));
+    Ok(())
+}
+
+/// 转正 plaita 的 reference 节点（child.py ReferenceFlow，引用逻辑）。plaita
+/// 的调度器在运行前按 flow_id/flow_version 把 child_flow 注入节点；本引擎的
+/// 对应物在加载期完成——经 FlowProvider 取回部署形态子流程文档注入
+/// childFlow，随后与 inline childFlow 同路走嵌入归一化+校验（嵌套 reference
+/// 在递归里继续解析，深度上限 32，环具名拒绝，菱形不误伤）。拍板依据
+/// （plaita-go#80 r78 Python 实测 + golden）：
+///
+///   - inline childFlow 在 reference 上拒绝：plaita 运行时把它丢掉
+///     （ReferenceFlow.setup_child_flow 与基类 FlowNode 同名遮蔽）并在执行期炸
+///     "child_flow for reference flow node is required"。加载期具名拒绝并指路，
+///     不给「本引擎能跑、plaita 跑不了」的跨运行时假象。
+///   - flowId 缺省（且无 inline）拒绝；provider 未配置/解析失败/文档非法 →
+///     装载失败（fail-closed）。
+fn translate_reference(
+    n: &mut Map<String, Value>,
+    resolver: Option<&FlowResolver>,
+    depth: u32,
+) -> Result<(), String> {
+    fold_key(n, "flow_id", "flowId");
+    fold_key(n, "flow_version", "flowVersion");
+    if let Some(cf) = n.get("childFlow") {
+        if !cf.is_null() {
+            return Err(
+                "reference node takes no inline childFlow: plaita's runtime drops it \
+                        (validator shadowing) and fails at run time with \"child_flow for \
+                        reference flow node is required\"; inline the sub-flow in a child node, \
+                        or declare flowId/flowVersion and load via ir::load_with_flow_provider"
+                    .to_string(),
+            );
+        }
+    }
+    let flow_id = get_str(n, &["flowId"]).unwrap_or_default();
+    if flow_id.is_empty() {
+        return Err(
+            "reference node requires flowId/flow_id (plaita's scheduler injects the \
+                    referenced flow by id; this engine resolves it at load time)"
+                .to_string(),
+        );
+    }
+    let flow_version = get_str(n, &["flowVersion"]).unwrap_or_default();
+    let Some(res) = resolver else {
+        return Err(format!(
+            "reference node {:?} references flow {:?}: no flow provider configured — use \
+             ir::load_with_flow_provider (plaita injects reference children by flowId at \
+             scheduling time)",
+            n.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
+            flow_id
+        ));
+    };
+    if depth >= MAX_REFERENCE_RESOLVE_DEPTH {
+        return Err(format!(
+            "reference node {:?}: reference chain deeper than {MAX_REFERENCE_RESOLVE_DEPTH} \
+             while resolving flow {flow_id:?} (cycle?)",
+            n.get("id").and_then(|v| v.as_str()).unwrap_or("?")
+        ));
+    }
+    let sub = res
+        .provider
+        .load_flow_json(
+            &flow_id,
+            (!flow_version.is_empty()).then_some(flow_version.as_str()),
+        )
+        .map_err(|e| {
+            format!(
+                "reference node {:?}: resolving flow {flow_id:?} (version {flow_version:?}): {e}",
+                n.get("id").and_then(|v| v.as_str()).unwrap_or("?")
+            )
+        })?;
+    if !sub.is_object() {
+        return Err(format!(
+            "reference node {:?}: flow {flow_id:?} is not a JSON flow document",
+            n.get("id").and_then(|v| v.as_str()).unwrap_or("?")
+        ));
+    }
+    n.insert("childFlow".into(), sub);
+    let mut meta = as_meta(n);
+    stash_into(
+        &mut meta,
+        "resolvedFrom",
+        Value::String(format!("{flow_id}@{flow_version}")),
+    );
+    n.insert("metadata".into(), Value::Object(meta));
+    Ok(())
 }
 
 fn translate_http(n: &mut Map<String, Value>) -> Result<(), String> {

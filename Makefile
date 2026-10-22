@@ -1,6 +1,6 @@
 # plaita-rs — build / test / differential gates (mirror of plaita-go's shape)
 
-.PHONY: build test clippy fmt go-ref build-cli diffcheck ci
+.PHONY: build test clippy fmt go-ref build-cli diffcheck node-parity ci
 
 build:
 	cargo build --workspace
@@ -30,4 +30,14 @@ build-cli:
 diffcheck: build-cli go-ref
 	python3 tools/diffcheck.py
 
-ci: test clippy
+# Python↔Rust node-type parity gate (#80 alignment): extract the authoritative
+# list from the sibling plaita + plaita-nodes checkouts, then run the
+# env-gated diff test. Entry points come from INSTALLED distributions — the
+# plaita venv must have both pip-installed (editable is fine).
+node-parity:
+	../plaita/.venv/bin/python scripts/extract_python_node_types.py \
+		--plaita ../plaita --plaita-nodes ../plaita-nodes --out /tmp/plaita-rs-node-types.json
+	PLAITA_NODE_TYPES_JSON=/tmp/plaita-rs-node-types.json \
+		cargo test -p plaita-engine --test node_type_parity -- --nocapture
+
+ci: test clippy node-parity
