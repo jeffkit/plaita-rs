@@ -158,29 +158,38 @@ fn run(cli: Cli) -> Result<(), String> {
 }
 
 fn println_event(flow_label: &str, event: &plaita_engine::Event) {
+    // "flow" 必须取事件自带的 flow_id：子流/分支事件的归属在引擎侧已经
+    // 算对，用根标签顶替会把子流故障记到根上（假红）或让子流在观测面上
+    // 凭空消失（假绿）。这次运行的根 flow 另以 "root" 给出。
     let line = match event {
-        plaita_engine::Event::FlowStart { .. } => serde_json::json!({
-            "event": "flow_start", "flow": flow_label,
+        plaita_engine::Event::FlowStart { flow_id } => serde_json::json!({
+            "event": "flow_start", "flow": flow_id, "root": flow_label,
         }),
-        plaita_engine::Event::FlowEnd { result, error, .. } => serde_json::json!({
-            "event": "flow_end", "flow": flow_label,
+        plaita_engine::Event::FlowEnd {
+            flow_id,
+            result,
+            error,
+        } => serde_json::json!({
+            "event": "flow_end", "flow": flow_id, "root": flow_label,
             "result": result, "error": error,
         }),
         plaita_engine::Event::NodeStart {
-            node_id, node_type, ..
+            flow_id,
+            node_id,
+            node_type,
         } => serde_json::json!({
-            "event": "node_start", "flow": flow_label,
+            "event": "node_start", "flow": flow_id, "root": flow_label,
             "node": node_id, "type": node_type,
         }),
         plaita_engine::Event::NodeEnd {
+            flow_id,
             node_id,
             node_type,
             result,
             error,
-            ..
         } => {
             serde_json::json!({
-                "event": "node_end", "flow": flow_label,
+                "event": "node_end", "flow": flow_id, "root": flow_label,
                 "node": node_id, "type": node_type,
                 "result": result, "error": error,
             })
