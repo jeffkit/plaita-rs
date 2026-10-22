@@ -15,7 +15,7 @@
 //! follows redirects), SSRF operator switches (the loader rejects flows
 //! that rely on them), response byte caps.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
@@ -38,6 +38,7 @@ pub(crate) fn execute_http(
     headers: Option<&Value>,
     body: Option<&Value>,
     rc: &SharedCtx,
+    deadline: Option<Instant>,
 ) -> Result<StepOutcome, NodeError> {
     // -- request generation (deterministic errors) ------------------------
     let url_text = eval_string_field(node, "url", url, rc)?;
@@ -64,7 +65,17 @@ pub(crate) fn execute_http(
         .parse()
         .map_err(|e| gen_err(node, &format!("invalid url {req_url:?}: {e}")))?;
 
-    let mut req = ureq::request(method, parsed.as_str()).timeout(next_timeout(node));
+    // budget = the smaller of the node timeout and the node/flow deadline
+    // (mirrors execute_code: the flow budget must bound the request, never
+    // be widened by it)
+    let budget = request_budget(node, deadline);
+    if budget.is_zero() {
+        return Err(NodeError::timeout(format!(
+            "http node {:?} timed out before send (node/flow deadline already passed)",
+            node.id
+        )));
+    }
+    let mut req = ureq::request(method, parsed.as_str()).timeout(budget);
     req = req.set("Content-Type", content_type);
     if let Some(hs) = headers {
         if !hs.is_null() {
@@ -100,6 +111,7 @@ pub(crate) fn execute_http(
         }
     };
 
+    let started = Instant::now();
     let send_result = match payload {
         None => req.call(),
         Some(p) => req.send_string(&p),
@@ -111,6 +123,14 @@ pub(crate) fn execute_http(
             resp
         }
         Err(e) => {
+            // a transport failure past the budget is the deadline firing
+            // (plaita-go surfaces ctx.Err() the same way), not a network
+            // hiccup — classify as Timeout so timeoutHandler can catch it
+            if started.elapsed() >= budget {
+                return Err(NodeError::timeout(format!(
+                    "http node: request timed out (node/flow deadline exceeded): {e}"
+                )));
+            }
             return Err(NodeError {
                 message: format!("http node: {e}"),
                 class: crate::error::ErrorClass::Transient,
@@ -191,6 +211,17 @@ fn next_timeout(node: &Node) -> Duration {
     node.timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT)
 }
 
+/// The whole-request budget: the node timeout (30s when unset), tightened
+/// by the node/flow deadline when one is in force. Never widened by the
+/// deadline — a deadline can only shorten the request budget.
+fn request_budget(node: &Node, deadline: Option<Instant>) -> Duration {
+    let mut budget = next_timeout(node);
+    if let Some(dl) = deadline {
+        budget = budget.min(dl.saturating_duration_since(Instant::now()));
+    }
+    budget
+}
+
 /// Renders a query object as `k=v&k2=v2` (percent-encoding via url crate);
 /// a plain string passes through.
 fn render_query(v: &Value) -> Option<String> {
@@ -217,6 +248,7 @@ fn render_query(v: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::NodeKind;
 
     #[test]
     fn query_rendering() {
@@ -226,5 +258,70 @@ mod tests {
         );
         assert_eq!(render_query(&json!("a=1")).unwrap(), "a=1");
         assert!(render_query(&json!(5)).is_none());
+    }
+
+    #[test]
+    fn budget_is_node_timeout_tightened_by_deadline() {
+        let dl_in_1s = Instant::now() + Duration::from_secs(1);
+        // unset node timeout keeps the 30s default when no deadline is in force
+        assert_eq!(
+            request_budget(&node_with_timeout(None), None),
+            Duration::from_secs(30)
+        );
+        // a deadline only ever tightens, never widens (wall-clock tolerant:
+        // the remaining time shrinks while the assertion runs)
+        let in_window = |b: Duration, lo: u64, hi: u64| {
+            assert!(
+                b >= Duration::from_millis(lo) && b <= Duration::from_millis(hi),
+                "budget {b:?} outside [{lo},{hi}] ms"
+            );
+        };
+        in_window(
+            request_budget(&node_with_timeout(None), Some(dl_in_1s)),
+            900,
+            1000,
+        );
+        in_window(
+            request_budget(
+                &node_with_timeout(Some(Duration::from_secs(10))),
+                Some(dl_in_1s),
+            ),
+            900,
+            1000,
+        );
+        assert_eq!(
+            request_budget(&node_with_timeout(Some(Duration::from_secs(10))), None),
+            Duration::from_secs(10)
+        );
+        // an already-passed deadline yields the zero-budget gate
+        let past = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            request_budget(&node_with_timeout(None), Some(past)),
+            Duration::ZERO
+        );
+    }
+
+    fn node_with_timeout(t: Option<Duration>) -> Node {
+        Node {
+            id: "h".to_string(),
+            node_type: "http".to_string(),
+            name: String::new(),
+            desc: String::new(),
+            output: None,
+            timeout: t,
+            error_policy: Default::default(),
+            timeout_policy: Default::default(),
+            next: None,
+            output_type: None,
+            metadata: Default::default(),
+            kind: NodeKind::Http {
+                method: "GET".to_string(),
+                content_type: String::new(),
+                url: "http://127.0.0.1:9/x".to_string(),
+                query: None,
+                headers: None,
+                body: None,
+            },
+        }
     }
 }

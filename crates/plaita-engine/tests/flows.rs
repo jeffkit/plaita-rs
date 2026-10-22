@@ -552,3 +552,46 @@ fn loop_condition_breaks_early() {
     let got = flow.execute(&json!({}), &Host::new()).unwrap();
     assert_eq!(got, json!(40));
 }
+
+/// http 节点必须接住流程/父节点预算（issue #3）：请求超时 =
+/// min(node.timeout, deadline)。先前 deadline 被丢弃——请求跑满对端的
+/// 5s，返回后错误才记到撞上过期 deadline 的下一个节点头上。
+#[test]
+fn http_node_honours_flow_deadline() {
+    // 测试内自建慢服务：accept 后搁置 5s 才回 200
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            use std::io::Write;
+            let _ = sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\nok",
+            );
+        }
+    });
+
+    let data = format!(
+        r#"{{
+        "flow_id": "http_deadline",
+        "timeout": "PT1S",
+        "nodes": [
+            {{"type": "start", "id": "s", "next": "h"}},
+            {{"type": "http", "id": "h", "url": "http://{addr}/x", "next": "e"}},
+            {{"type": "end", "id": "e", "resultType": "success", "output": "$NODE.h.status"}}
+        ]}}"#
+    );
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let t0 = std::time::Instant::now();
+    let err = flow.execute(&json!({}), &Host::new()).unwrap_err();
+    let elapsed = t0.elapsed();
+    // 预算 1s 生效：不能跑满对端的 5s
+    assert!(
+        elapsed < std::time::Duration::from_millis(2500),
+        "flow budget must bound the request, elapsed {elapsed:?}"
+    );
+    // 超时归因 http 节点本身，而不是下一个撞上过期 deadline 的节点
+    assert!(err.to_string().contains("node \"h\" (http)"), "{err}");
+    // 归 Timeout 类（timeoutHandler 可接住），不再一律 1002 瞬态
+    assert!(!err.to_string().contains("code: 1002"), "{err}");
+}
