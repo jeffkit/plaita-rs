@@ -163,6 +163,7 @@ pub(crate) fn execute_code(
     sandbox_backend: &str,
     rc: &SharedCtx,
     deadline: Option<Instant>,
+    cancel_event: &std::sync::atomic::AtomicBool,
 ) -> Result<StepOutcome, NodeError> {
     match language {
         "python" => {
@@ -185,19 +186,20 @@ pub(crate) fn execute_code(
                 })?,
                 None => Value::Null,
             };
-            let result = run_python_subprocess(code, arguments, deadline).map_err(|e| {
-                // 代码错误按确定性分类（plaita ValueError 语义，不烧重试预算）
-                // ——但 Timeout 类必须保留：引擎的节点/流程 timeoutHandler
-                // 以 class==Timeout 为闸，抹掉它会让超时策略对 code 节点失哑
-                if e.class == crate::error::ErrorClass::Timeout {
-                    e
-                } else {
-                    NodeError::deterministic(format!(
-                        "code node: failed to interpret code: {}",
-                        e.message
-                    ))
-                }
-            })?;
+            let result =
+                run_python_subprocess(code, arguments, deadline, cancel_event).map_err(|e| {
+                    // 代码错误按确定性分类（plaita ValueError 语义，不烧重试预算）
+                    // ——但 Timeout 类必须保留：引擎的节点/流程 timeoutHandler
+                    // 以 class==Timeout 为闸，抹掉它会让超时策略对 code 节点失哑
+                    if e.class == crate::error::ErrorClass::Timeout {
+                        e
+                    } else {
+                        NodeError::deterministic(format!(
+                            "code node: failed to interpret code: {}",
+                            e.message
+                        ))
+                    }
+                })?;
             crate::nodes::validate_output_pub(node, "code output", &result)?;
             Ok(StepOutcome {
                 result,
@@ -223,6 +225,7 @@ fn run_python_subprocess(
     code: &str,
     input: Value,
     deadline: Option<Instant>,
+    cancel_event: &std::sync::atomic::AtomicBool,
 ) -> Result<Value, NodeError> {
     let timeout_secs = positive_int_env_seconds(PY_SANDBOX_TIMEOUT_ENV, PY_DEFAULT_TIMEOUT_SECS)?;
     let mem_mb = sandbox_memory_mb()?;
@@ -274,13 +277,17 @@ fn run_python_subprocess(
         })
     });
 
-    let timeout_result = wait_with_timeout(child, budget, writer);
+    let timeout_result = wait_with_timeout(child, budget, writer, cancel_event);
     match timeout_result {
         WaitOutcome::TimedOut => Err(NodeError::timeout(format!(
             "Subprocess sandbox timed out after {}s (process tree killed). \
              Increase the timeout env var or optimise the code.",
             budget.as_secs_f64()
         ))),
+        WaitOutcome::Cancelled => Err(NodeError::transient_with_code(
+            "python sidecar: execution cancelled (process tree killed)",
+            crate::error::RUNTIME_ERROR_CODE,
+        )),
         WaitOutcome::Failed(e) => Err(NodeError::deterministic(format!("python sidecar: {e}"))),
         WaitOutcome::Done(status, stdout, stderr) => {
             let stdout_text = String::from_utf8_lossy(&stdout).to_string();
@@ -303,6 +310,9 @@ fn run_python_subprocess(
 enum WaitOutcome {
     Done(std::process::ExitStatus, Vec<u8>, Vec<u8>),
     TimedOut,
+    /// 执行级取消：进程组已杀；exec.rs 的取消优先臂把它改判为
+    /// FlowError::Cancelled（code=-4），不经任何节点策略链。
+    Cancelled,
     Failed(String),
 }
 
@@ -316,6 +326,7 @@ fn wait_with_timeout(
     mut child: std::process::Child,
     budget: Duration,
     writer: Option<std::thread::JoinHandle<()>>,
+    cancel_event: &std::sync::atomic::AtomicBool,
 ) -> WaitOutcome {
     let deadline = Instant::now() + budget;
     let outcome = loop {
@@ -334,6 +345,14 @@ fn wait_with_timeout(
                 break WaitOutcome::Done(status, stdout, stderr);
             }
             Ok(None) => {
+                // 执行级取消（plaita#267 波次③；Python `_popen_wait_cancellable`
+                // 观察到 cancel_event 当场收尸同形）：置位即杀整个进程组。
+                // 该错误会被 exec.rs 的取消优先臂拦下改判为具名取消终态，
+                // 永远到不了 errorHandler/timeout 链。
+                if cancel_event.load(std::sync::atomic::Ordering::SeqCst) {
+                    kill_process_group(&mut child);
+                    break WaitOutcome::Cancelled;
+                }
                 if Instant::now() >= deadline {
                     kill_process_group(&mut child);
                     break WaitOutcome::TimedOut;

@@ -13,8 +13,9 @@
 //! Not ported (documented): delegate/addressing (internal infrastructure,
 //! removed from plaita-go too), manual hop-by-hop redirect policy (ureq
 //! follows redirects), SSRF operator switches (the loader rejects flows
-//! that rely on them), response byte caps.
+//! that rely on them).
 
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
@@ -27,6 +28,84 @@ use crate::nodes::StepOutcome;
 const DEFAULT_CONTENT_TYPE: &str = "application/json";
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_CTX_KEY: &str = "RESPONSE";
+
+/// 响应体字节上限的运营旋钮（plaita#31 对齐，B4 r8）：Python
+/// `node/http.py::HTTP_MAX_RESPONSE_BYTES_ENV` 同名同义。
+pub(crate) const HTTP_MAX_RESPONSE_BYTES_ENV: &str = "PLAITA_HTTP_MAX_RESPONSE_BYTES";
+
+/// 默认帽 10MiB（Python `node/http.py::DEFAULT_MAX_RESPONSE_BYTES`）。
+pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Parses [`HTTP_MAX_RESPONSE_BYTES_ENV`]: unset → the default (silently,
+/// Python's `name not in env` early return). Anything present must be a
+/// strict integer ≥ 1 (strip-then `[+-]?\d+`: ` 2048 `/`+4096` pass;
+/// `` /`abc`/`1.5`/`1e3`/`0`/`-5` are invalid). `Err` carries the warning
+/// text — the caller prints it and falls back to the default (Python
+/// `optional_int_env` logs a WARNING with the same meaning, never silent).
+pub(crate) fn parse_max_response_bytes(raw: Option<&str>) -> Result<usize, String> {
+    fn invalid(raw: &str) -> String {
+        format!(
+            "{HTTP_MAX_RESPONSE_BYTES_ENV}={raw:?} is not a valid integer (>=1); falling back \
+             to the default response cap of {DEFAULT_MAX_RESPONSE_BYTES} bytes (NOT silently \
+             unlimited)"
+        )
+    }
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_MAX_RESPONSE_BYTES);
+    };
+    // Python parse_int: strict `[+-]?\d+` on the stripped text; i128 parse
+    // accepts exactly that shape (sign + ascii digits) and rejects
+    // `1.5`/`1e3`/`0x10`/blank the same way.
+    match raw.trim().parse::<i128>() {
+        // Above u64 the cap is beyond any readable body; Rust cannot hold
+        // Python's unbounded int — warning + default keeps this observable
+        // and fail-closed (deliberate divergence on that extreme edge).
+        Ok(v) if v >= 1 => usize::try_from(v).map_err(|_| invalid(raw)),
+        _ => Err(invalid(raw)),
+    }
+}
+
+/// Resolves the effective response cap for one http-node execution, warning
+/// on stderr when the env value is invalid (the Rust dialect of Python's
+/// `logger.warning` in `optional_int_env`).
+pub(crate) fn http_max_response_bytes() -> usize {
+    let raw = std::env::var(HTTP_MAX_RESPONSE_BYTES_ENV).ok();
+    match parse_max_response_bytes(raw.as_deref()) {
+        Ok(cap) => cap,
+        Err(warning) => {
+            eprintln!("[http] {warning}");
+            DEFAULT_MAX_RESPONSE_BYTES
+        }
+    }
+}
+
+#[derive(Debug)]
+enum BodyReadError {
+    /// Over the configured cap — the named, knobby error (Python
+    /// `ResponseTooLargeError`).
+    TooLarge {
+        cap: usize,
+    },
+    Io(std::io::Error),
+    NotUtf8(std::str::Utf8Error),
+}
+
+/// Streams at most `cap + 1` bytes off the response body; `len > cap`
+/// surfaces as [`BodyReadError::TooLarge`] (mirrors Python
+/// `_read_capped_requests_body`: 64KiB-chunk counting would only slow this
+/// down — `Read::take` bounds the memory the same way).
+fn read_capped_body(mut reader: impl Read, cap: usize) -> Result<String, BodyReadError> {
+    let mut buf = Vec::new();
+    reader
+        .by_ref()
+        .take(cap.saturating_add(1) as u64)
+        .read_to_end(&mut buf)
+        .map_err(BodyReadError::Io)?;
+    if buf.len() > cap {
+        return Err(BodyReadError::TooLarge { cap });
+    }
+    String::from_utf8(buf).map_err(|e| BodyReadError::NotUtf8(e.utf8_error()))
+}
 
 #[allow(clippy::too_many_arguments)] // mirrors the flat node field shape
 pub(crate) fn execute_http(
@@ -152,12 +231,23 @@ pub(crate) fn execute_http(
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    let body_bytes = response.into_string().map_err(|e| {
-        NodeError::transient_with_code(
-            format!("http node: read body: {e}"),
-            crate::error::NODE_EXEC_ERROR_CODE,
-        )
-    })?;
+    let body_bytes =
+        read_capped_body(response.into_reader(), http_max_response_bytes()).map_err(|e| {
+            let msg = match e {
+                // Python ResponseTooLargeError 同文：点名帽值与提升路径
+                BodyReadError::TooLarge { cap } => format!(
+                    "HTTP response body exceeds maxResponseBytes={cap}; \
+                     raise {HTTP_MAX_RESPONSE_BYTES_ENV} to allow larger bodies"
+                ),
+                // ureq 2.x `into_string` 对 IO/非 UTF-8 的同族旧方言
+                BodyReadError::Io(e) => format!("read body: {e}"),
+                BodyReadError::NotUtf8(e) => format!("read body: {e}"),
+            };
+            NodeError::transient_with_code(
+                format!("http node: {msg}"),
+                crate::error::NODE_EXEC_ERROR_CODE,
+            )
+        })?;
     let data: Value = if content_type_resp.contains("json") {
         serde_json::from_str::<Value>(&body_bytes).unwrap_or(Value::String(body_bytes.clone()))
     } else {
@@ -249,6 +339,61 @@ fn render_query(v: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use crate::model::NodeKind;
+
+    /// Python `optional_int_env(name, 10MiB, minimum=1)` 的值域口径：
+    /// 未设静默回默认；strip 后 `[+-]?\d+` 严格整数、<1 非法；非法=Err
+    /// 警告文本（调用方 stderr 告警+回默认，绝不静默）。
+    #[test]
+    fn max_response_bytes_env_parsing() {
+        assert_eq!(
+            parse_max_response_bytes(None),
+            Ok(DEFAULT_MAX_RESPONSE_BYTES)
+        );
+        assert_eq!(parse_max_response_bytes(Some("1024")), Ok(1024));
+        assert_eq!(parse_max_response_bytes(Some(" 2048 ")), Ok(2048));
+        assert_eq!(parse_max_response_bytes(Some("+4096")), Ok(4096));
+        assert_eq!(
+            parse_max_response_bytes(Some("10485760")),
+            Ok(DEFAULT_MAX_RESPONSE_BYTES)
+        );
+        for bad in ["abc", "", "  ", "0", "-5", "1.5", "1e3", "0x10", "１０"] {
+            let got = parse_max_response_bytes(Some(bad));
+            assert!(got.is_err(), "{bad:?} must be rejected");
+            assert!(
+                got.unwrap_err().contains("NOT silently unlimited"),
+                "{bad:?}"
+            );
+        }
+        // 超出 u64 的帽值：Rust 存不下 Python 的无界 int——fail-closed 回默认
+        let huge = "18446744073709551616"; // u64::MAX + 1
+        assert!(parse_max_response_bytes(Some(huge)).is_err(), "{huge}");
+        // i64 上限内的合法大值照常通过
+        assert_eq!(
+            parse_max_response_bytes(Some("9223372036854775807")),
+            Ok(usize::try_from(9223372036854775807i64).unwrap())
+        );
+    }
+
+    /// 边界=`total > max_bytes` 才拒（Python 同口径）：恰在帽上放行，
+    /// 帽+1 具名拒；非 UTF-8 维持 ureq `into_string` 的旧拒面。
+    #[test]
+    fn capped_body_boundary_is_greater_than_cap() {
+        let body = "x".repeat(2048);
+        assert_eq!(
+            read_capped_body(body.as_bytes(), 2048).unwrap(),
+            body,
+            "exactly at the cap must pass"
+        );
+        match read_capped_body(body.as_bytes(), 1024) {
+            Err(BodyReadError::TooLarge { cap }) => assert_eq!(cap, 1024),
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+        match read_capped_body(&[0xffu8, 0xfe][..], 16) {
+            Err(BodyReadError::NotUtf8(_)) => {}
+            other => panic!("expected NotUtf8, got {other:?}"),
+        }
+        assert_eq!(read_capped_body(&b"ok"[..], 16).unwrap(), "ok");
+    }
 
     #[test]
     fn query_rendering() {

@@ -98,6 +98,7 @@ pub fn execute_node_body(
             sandbox_backend,
             rc,
             deadline,
+            host.cancel_event_flag(),
         ),
         NodeKind::Http { .. } => {
             #[cfg(feature = "http")]

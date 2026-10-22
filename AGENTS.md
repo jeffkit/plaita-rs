@@ -64,6 +64,14 @@ tools/
    流恒单次执行，Go 的整流重投 ×(1+n) 不实现（Python Flow 模型无该字段）；③parallel
    分支并发上限=Python 后台池口径（默认 8、同名 env 可调、嵌套池内降级串行内联；
    Go 分支 goroutine 无上限）。
+8. **Python 权威二对齐（B4 r8，P3 双单）**：
+   ④http 响应帽可调——`PLAITA_HTTP_MAX_RESPONSE_BYTES`（默认 10MiB、strip 后严格整数 ≥1、
+   非法值警告+回默认；超限流式帽读具名错误 code 1003 可重试，消息点名 maxResponseBytes
+   与 env 提升路径；Go/ureq 为 `into_string` 固定 10MiB）；⑤执行级取消面——`Host::cancel()`
+   （幂等置位粘滞 `cancel_requested` + 节点作用域 `cancel_event`：节点边界具名拒绝
+   `FlowError::Cancelled` code:-4 且先于重试/errorHandler、code 沙箱等待循环 killpg 整树、
+   退避 0.5s 分片可打断、默认步界取消、Host 克隆共享=父子链传播；Go 无此面，Python
+   runner/executor 2026-10 波次③语义，出处 plaita#267）。
 
 ## 审计记录（2026-10-21，四路子智能体对抗审计）
 
@@ -80,7 +88,7 @@ tools/
 - P2 群：`_`/dunder 属性闸覆盖非映射基底、`$NULL/$EMPTYSTRING` 后继路径、`\`+换行拒绝、`%g` 负指数、零转换符多余实参报错、sidecar 真进程组杀（process_group(0)+kill -9 -PID）；
 - ir 审计 6 单：end resultType 类型漏拒 / `$F` 扫描 lookbehind+`\s` / globalContext 显式 context 胜出 / http addressing·delegate fail-closed / unknownFields 落 metadata / retryTimes 严格化 + Property 双拼写残留清理 + trpc/mdb 族 hint + version 长度检查。
 
-**文档化残余（有意/存档，不算 bug）**：无全图环保护——switch 自环合法装载，防死循环=配 flow timeout，缺省另有 1800s 执行预算兜底（B4 r7，不再无限自旋）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试已整体撤出（B4 r7 对齐 Python 单次执行——先前「每轮重建上下文」的分歧面随之消失）。
+**文档化残余（有意/存档，不算 bug）**：无全图环保护——switch 自环合法装载，防死循环=配 flow timeout，缺省另有 1800s 执行预算兜底（B4 r7，不再无限自旋）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试已整体撤出（B4 r7 对齐 Python 单次执行——先前「每轮重建上下文」的分歧面随之消失）；子流预算沿父 remaining（min 合成）vs Python「子执行新鲜独立预算（缺省 1800s，父 remaining 不穿透，B4 r8 实读更正 r7 台账注记）」——形状分歧 P3 待裁决；`$ERROR` 根与 `maxRedirects` 静默忽略两枚 Go 残面已盘点入台账（B4 r8）待裁决。
 
 ## 运行期字符串契约：配置求值、运行期数据（2026-10-21，jeffkit 终裁）
 
