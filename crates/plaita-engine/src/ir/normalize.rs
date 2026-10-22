@@ -19,6 +19,8 @@
 
 use serde_json::{Map, Value};
 
+use std::time::Instant;
+
 use crate::duration;
 use crate::ir::support::{as_float, get_str, is_object, next_is_empty, obj, stash_into, take};
 use crate::ir::{scope::Scope, validate};
@@ -866,9 +868,9 @@ pub fn normalize_timeout(v: &Value) -> Result<Option<String>, String> {
                 return Ok(None);
             }
             if s.starts_with('P') {
-                duration::parse_iso8601(s)
-                    .map(|_| Some(s.to_string()))
-                    .map_err(|e| format!("timeout {s:?}: {e}"))
+                let d = duration::parse_iso8601(s).map_err(|e| format!("timeout {s:?}: {e}"))?;
+                check_instant_range(s, d)?;
+                Ok(Some(s.to_string()))
             } else {
                 let ms: f64 = s
                     .parse()
@@ -881,6 +883,22 @@ pub fn normalize_timeout(v: &Value) -> Result<Option<String>, String> {
     }
 }
 
+/// 「Duration 可表示但超出平台 Instant 值域」的预算在这里具名拒载
+///（r1 移交的运行期 panic——`Instant::now() + t` 裸加在 release/debug 都
+/// 是进程级 panic，errorHandler/$ERROR 一律接不到）：fail-closed 收在装载
+/// 期，flow/node/嵌入流共用本出口。e.g. PT100000000000S（≈3170 年）能被
+/// Duration 表示，但构不成任何运行期 deadline。
+fn check_instant_range(iso: &str, d: std::time::Duration) -> Result<(), String> {
+    if Instant::now().checked_add(d).is_none() {
+        return Err(format!(
+            "timeout {iso:?} exceeds the platform instant range: the budget is representable \
+             but no runtime deadline can be formed from it (fail-closed at load; reduce the \
+             timeout)"
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_millis(ms: f64) -> Result<Option<String>, String> {
     if ms.is_infinite() || ms.is_nan() {
         return Err(format!("timeout {ms} must be a finite number"));
@@ -891,7 +909,10 @@ fn normalize_millis(ms: f64) -> Result<Option<String>, String> {
     if ms == 0.0 {
         return Ok(Some("PT0S".to_string()));
     }
-    Ok(Some(millis_to_iso(ms)))
+    let iso = millis_to_iso(ms);
+    let d = duration::parse_iso8601(&iso).map_err(|e| format!("timeout {iso:?}: {e}"))?;
+    check_instant_range(&iso, d)?;
+    Ok(Some(iso))
 }
 
 fn millis_to_iso(ms: f64) -> String {

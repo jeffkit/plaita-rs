@@ -94,7 +94,13 @@ impl RuntimeCtx {
         flow: &crate::model::Flow,
         outer_deadline: Option<std::time::Instant>,
     ) -> SharedCtx {
-        let own = flow.timeout.map(|t| std::time::Instant::now() + t);
+        // 装载期（normalize_timeout）已拒掉超平台 Instant 值域的预算；这里
+        // checked_add 是程序化构造 Flow 的防御面（裸加是进程级 panic）。
+        // 溢出意味着预算大到等效无界——数学上 own 晚于任何可表示的 outer，
+        // min(own, outer) = outer，回落 None（仅 outer）语义不变。
+        let own = flow
+            .timeout
+            .and_then(|t| std::time::Instant::now().checked_add(t));
         let deadline = match (own, outer_deadline) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),

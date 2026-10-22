@@ -7,6 +7,7 @@
 //! checkpoint/server responsibilities live with the worker runtime and are
 //! deliberately out of scope here.
 
+pub mod budget;
 pub mod context;
 pub mod duration;
 pub mod error;
