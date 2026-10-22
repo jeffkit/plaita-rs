@@ -17,10 +17,14 @@ pub struct DurationError(pub String);
 pub type Timeout = Option<Duration>;
 
 /// Parses an ISO 8601 duration string with fixed-length components.
-/// `"PT"` parses as an explicit zero budget.
+/// `"PT"` parses as an explicit zero budget. Out-of-range values (seconds
+/// past the `Duration` domain, overflowing component arithmetic) are a
+/// named error — fail-closed, never a panic (std `from_secs_f64` panics
+/// in every profile).
 pub fn parse_iso8601(s: &str) -> Result<Duration, DurationError> {
     let s = s.trim();
     let err = |m: &str| Err(DurationError(m.to_string()));
+    let unrepresentable = |s: &str| DurationError(format!("duration {s:?} is not representable"));
     let rest = match s.strip_prefix('P') {
         Some(r) => r,
         None => return err(&format!("could not parse duration string {s:?}")),
@@ -51,8 +55,11 @@ pub fn parse_iso8601(s: &str) -> Result<Duration, DurationError> {
                         "duration {s:?} contains year/month components, which have no fixed length"
                     ))
                 }
-                'W' => days += n * 7,
-                'D' => days += n,
+                'W' => {
+                    let w = n.checked_mul(7).ok_or_else(|| unrepresentable(s))?;
+                    days = days.checked_add(w).ok_or_else(|| unrepresentable(s))?;
+                }
+                'D' => days = days.checked_add(n).ok_or_else(|| unrepresentable(s))?,
                 _ => return err(&format!("could not parse duration string {s:?}")),
             }
             unit_seen = true;
@@ -95,7 +102,7 @@ pub fn parse_iso8601(s: &str) -> Result<Duration, DurationError> {
     if secs.is_nan() || secs.is_infinite() {
         return err(&format!("invalid duration component in {s:?}"));
     }
-    Ok(Duration::from_secs_f64(secs))
+    Duration::try_from_secs_f64(secs).map_err(|_| unrepresentable(s))
 }
 
 /// Renders a duration back to the engine's canonical ISO spelling.
@@ -138,5 +145,25 @@ mod tests {
         assert!(parse_iso8601("").is_err());
         assert_eq!(to_iso(Duration::from_secs(3)), "PT3S");
         assert_eq!(to_iso(Duration::from_millis(1500)), "PT1.5S");
+    }
+
+    #[test]
+    fn out_of_range_is_named_error_not_panic() {
+        let cases = [
+            "P999999999999999D",       // days → secs past the u64 seconds domain
+            "PT99999999999999999999S", // seconds past the u64 seconds domain
+            "P9223372036854775807W", // n*7 overflows i64 (debug); wraps then hits from_secs_f64 (release)
+            "P9223372036854775807D", // days accumulation overflows i64
+        ];
+        for s in cases {
+            let r = std::panic::catch_unwind(|| parse_iso8601(s))
+                .expect("parse_iso8601 must not panic on out-of-range durations");
+            assert!(
+                r.is_err(),
+                "out-of-range {s:?} must be a named error, got {r:?}"
+            );
+        }
+        // big-but-representable budgets keep parsing
+        assert!(parse_iso8601("P106751991167301D").is_ok());
     }
 }
