@@ -61,20 +61,21 @@ MANIFEST: list[tuple[str, Path, dict | None]] = [
     ("load/depth-100", CASES / "load_depth_100.json", None),
     ("load/branches-str", CASES / "load_branches_str.json", None),
     ("load/next-int", CASES / "load_next_int.json", None),
+    # 孤立代理转义（卡 R-3 known-red 转正，2026-10-23）：G-1 修口已合
+    # plaita-go main（RejectLoneSurrogateEscapes 双执法点）、go-ref 重建后
+    # 形状由 ok/error 翻为双侧同拒——按门的翻绿指引升入本表。
+    ("load/lone-surrogate-high", CASES / "load_lone_surrogate_high.json", None),
+    ("load/lone-surrogate-low", CASES / "load_lone_surrogate_low.json", None),
 ]
 
-# Known-red 负控（A1 r132 卡 G-1×R-3 联动）：引擎当下的 recorded 分歧，
-# 每条钉死「期望分歧形状」；形状保持期间门绿。G-1 修口合并 plaita-go main、
-# go-ref 重建后形状翻转为双侧同拒——届时本门会红并给出翻绿指引：把该案
-# 升入 MANIFEST（both-error 类级绿）并从本表删除。
+# Known-red 负控：引擎当下的 recorded 分歧，每条钉死「期望分歧形状」；
+# 形状保持期间门绿，漂移即红并给归因/翻绿指引（双侧同拒→升 MANIFEST，
+# 反向漂移→先归因再动本表）。当前为空——lone-surrogate 两案已随 G-1
+# 修口合并（2026-10-23）翻绿转正升入 MANIFEST。
 #
 # 深度 150（go 过/rs 128 拒）按卡**永不进门**：永久刻意分歧，只入
 # AGENTS.md + cargo test 钉 128（卡 R-4），不进等值门也不进本表。
-KNOWN_RED: list[tuple[str, Path, dict | None, str, str]] = [
-    # (name, flow_path, input, 期望 go 结局, 期望 rs 结局) — "ok"/"error"
-    ("load/lone-surrogate-high", CASES / "load_lone_surrogate_high.json", None, "ok", "error"),
-    ("load/lone-surrogate-low", CASES / "load_lone_surrogate_low.json", None, "ok", "error"),
-]
+KNOWN_RED: list[tuple[str, Path, dict | None, str, str]] = []
 
 
 def run_go(go_ref: Path, flow: Path, inp: dict | None) -> tuple[str | None, str]:
@@ -249,14 +250,14 @@ def main() -> int:
         if (go_got, rs_got) == (go_want, rs_want):
             print(f"{name:34} {'ok' if go_out is not None else 'ERR':>10} "
                   f"{'ok' if rs_out is not None else 'ERR':>10} "
-                  f"known-red holds ({shape}; 待 G-1 翻绿)")
+                  f"known-red holds ({shape})")
             continue
         failures += 1
         print(f"{name:34} {'ok' if go_out is not None else 'ERR':>10} "
               f"{'ok' if rs_out is not None else 'ERR':>10} "
               f"KNOWN-RED SHAPE CHANGED ({shape}, was {go_want}/{rs_want})")
         if go_got == "error" and rs_got == "error":
-            print(f"{'':34} → G-1 已合且 go-ref 已重建:双侧同拒已成一致——"
+            print(f"{'':34} → 双侧同拒已成一致——"
                   f"把本案升入 MANIFEST 并从 KNOWN_RED 删除(翻绿进门)")
         else:
             print(f"{'':34} → 形状漂移非 G-1 方向:先归因(rs 开始收=回归,查拒载面;"
@@ -269,7 +270,7 @@ def main() -> int:
         return 1
     print(f"OK: {len(MANIFEST)}/{len(MANIFEST)} manifest cases agree; "
           f"{len(KNOWN_RED)}/{len(KNOWN_RED)} known-red negatives hold"
-          + (" (待 G-1 修口合并后翻绿)" if KNOWN_RED else ""))
+          + (" (recorded divergence still holding)" if KNOWN_RED else ""))
     return 0
 
 
