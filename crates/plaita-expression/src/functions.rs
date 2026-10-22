@@ -855,28 +855,36 @@ fn fn_sort(args: &[Value]) -> Result<Value, EvalError> {
         _ => String::new(),
     };
     let desc = matches!(args.get(2), Some(Value::Bool(true)));
-    let mut out = list_arg("sort", args, 0)?;
-    let key = move |v: &Value| sort_key_of(v, &sort_key);
-    // stable insertion sort over the key values (small n in practice)
-    for i in 1..out.len() {
-        let mut j = i;
-        while j > 0 {
-            let (a, b) = (key(&out[j - 1]), key(&out[j]));
-            let ord = crate::value::compare("$F.sort", &a, &b)?;
-            // ascending: swap when prev > cur; descending: swap when prev < cur
-            let out_of_order = match ord {
-                std::cmp::Ordering::Greater => !desc,
-                std::cmp::Ordering::Less => desc,
-                std::cmp::Ordering::Equal => false,
-            };
-            if !out_of_order {
-                break;
-            }
-            out.swap(j - 1, j);
-            j -= 1;
-        }
+    let out = list_arg("sort", args, 0)?;
+    // Schwartzian 变换：每个元素只取一次 key（Python sorted(key=...) 的形状）。
+    // 旧实现是插入排序且每次比较重新取两次键（各 clone 一次）——O(n²) 带分配，
+    // 64k 倒序整数 release 实测 54.9s；Python sorted()/Go SliceStable 都是
+    // O(n log n)，n 来自运行期数据，慢不是可接受的有意行为。
+    let mut keyed: Vec<(Value, Value)> = out
+        .into_iter()
+        .map(|v| {
+            let k = sort_key_of(&v, &sort_key);
+            (k, v)
+        })
+        .collect();
+    // 可比性预检：O(n) 相邻比较。compare 只认 numeric 与 str 两族，原序里
+    // 只要存在跨类元素就必然有一对相邻跨类键——错误类型与文案与现在同源，
+    // 且预检后比较器闭包不可能再失败（sort_by 的比较器不能向上抛错，也不能
+    // 用「错误槽 + 一律 Equal」让全序契约破洞）。
+    for pair in keyed.windows(2) {
+        crate::value::compare("$F.sort", &pair[0].0, &pair[1].0)?;
     }
-    Ok(Value::Array(out))
+    // slice::sort_by 稳定（等价 Timsort/SliceStable），相等键原相对顺序保持；
+    // desc 用 Ordering::reverse 表达。
+    keyed.sort_by(|(ka, _), (kb, _)| {
+        let o = crate::value::compare("$F.sort", ka, kb).unwrap_or(std::cmp::Ordering::Equal);
+        if desc {
+            o.reverse()
+        } else {
+            o
+        }
+    });
+    Ok(Value::Array(keyed.into_iter().map(|(_, v)| v).collect()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1864,5 +1872,54 @@ mod tests {
         assert_eq!(call("$F.round(2.5)", e.clone()), json!(2));
         assert_eq!(call("$F.round(1.2345, 2)", e.clone()), json!(1.23));
         assert_eq!(call("$F.round(3, 1)", e.clone()), json!(3));
+    }
+
+    // -- #6：$F.sort 算法改制的守恒锚与性能分母 ------------------------------
+
+    #[test]
+    fn sort_behavior_conserved() {
+        // 稳定性：相等键保持原相对顺序（Python Timsort / Go SliceStable 同约）
+        let st = json!({"a": [{"k": 1, "i": 0}, {"k": 1, "i": 1}, {"k": 0, "i": 2}]});
+        assert_eq!(
+            call("$F.sort($INPUT.a, 'k')", st.clone()),
+            json!([{"k": 0, "i": 2}, {"k": 1, "i": 0}, {"k": 1, "i": 1}])
+        );
+        assert_eq!(
+            call("$F.sort($INPUT.a, 'k', true)", st),
+            json!([{"k": 1, "i": 0}, {"k": 1, "i": 1}, {"k": 0, "i": 2}])
+        );
+        // 字符串序
+        assert_eq!(
+            call("$F.sort($INPUT.a)", json!({"a": ["b", "a", "c"]})),
+            json!(["a", "b", "c"])
+        );
+        // None 键参与比较仍是 TypeError（缺键回退 None 的既有语义）
+        assert!(eval_str(
+            "$F.sort($INPUT.a, 'k')",
+            &roots(json!({"a": [{"k": Value::Null}, {"k": 1}]}))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sort_large_input_within_budget() {
+        // #6 性能分母（防退化）：64k 倒序整数，旧插入排序 release 实测
+        // 17.56s（debug 分钟级），O(n log n) 在 debug 下也远低于 5s。
+        // 结果守恒断言同测：升序且恰为 0..64000（多重集不变）。
+        let input: Vec<i64> = (0..64_000).rev().collect();
+        let t0 = std::time::Instant::now();
+        let out = eval_str("$F.sort($INPUT)", &roots(json!(input))).unwrap();
+        let dt = t0.elapsed();
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr.len(), 64_000);
+        assert_eq!(arr[0].as_i64().unwrap(), 0);
+        assert_eq!(arr[63_999].as_i64().unwrap(), 63_999);
+        assert!(arr
+            .windows(2)
+            .all(|w| w[0].as_i64().unwrap() <= w[1].as_i64().unwrap()));
+        assert!(
+            dt < std::time::Duration::from_secs(5),
+            "sort 64k took {dt:?}"
+        );
     }
 }
