@@ -136,7 +136,12 @@ fn fn_sub(args: &[Value]) -> Result<Value, EvalError> {
     arity("sub", args, 2)?;
     let (a, b) = (&args[0], &args[1]);
     if let (Some(ai), Some(bi)) = (py_int(a), py_int(b)) {
-        return int_add_overflow(ai, -bi)
+        // checked_sub 不产生中间负数：先前的 `-bi` 在 bi == i64::MIN 处自身
+        // 溢出（release 回绕 → sub(0, MIN) 静默返回负值 / debug panic）。
+        // 真值在域内的 sub(MIN, MIN)=0 直接放行（Python: 0），域外的
+        // sub(0, MIN)=2^63 落 add/mul/pow 同款 OverflowError。
+        return ai
+            .checked_sub(bi)
             .map(Value::from)
             .ok_or_else(|| EvalError::overflow("$F.sub: integer subtraction result too large"));
     }
@@ -330,7 +335,15 @@ fn fn_pow(args: &[Value]) -> Result<Value, EvalError> {
 fn fn_abs(args: &[Value]) -> Result<Value, EvalError> {
     arity("abs", args, 1)?;
     if let Some(i) = py_int(&args[0]) {
-        return Ok(Value::from(i.abs()));
+        // abs(i64::MIN) = 2^63 出 i64 域：裸 abs() 是 std 写明的双 profile
+        // 分歧（debug panic / release 回绕回负值）。落 add/mul/pow 同款
+        // OverflowError（AGENTS 文档化残余「>i64 报 OverflowError」出口；
+        // Python 权威给 2**63，plaita-go 静默回负——负值不落任何允许出口，
+        // Go 侧同根问题按跨仓同根拆单提报）。
+        return i
+            .checked_abs()
+            .map(Value::from)
+            .ok_or_else(|| EvalError::overflow("$F.abs: integer absolute value too large"));
     }
     if let Some(f) = py_float(&args[0]) {
         return Ok(Value::from(f.abs()));
@@ -408,8 +421,27 @@ fn fn_round(args: &[Value]) -> Result<Value, EvalError> {
         return py_round_to_int(f).map(Value::from);
     }
     let n = py_index_arg("round", &args[1])?;
+    if !f.is_finite() {
+        // round(inf/nan, n) 原样返回（Python 实测）——必须先于值域判断
+        return float_value(f);
+    }
     if n == 0 {
         return float_value(py_round_digits(f, 0));
+    }
+    // CPython 口径（本地实跑核对）：任何 f64 的十进制展开至多 1074 位
+    // （2^-1074 亚常规尾数），n ≥ 1075 时舍入位置在展开之外 → 恒等
+    // （round(1e-20, 4294967297) == 1e-20）；n ∈ [18, 1074] 仍是真实按位
+    // 舍入（round(1e-20, 18) == 0.0、round(1e-20, 20) == 1e-20）——旧实现
+    // `n as i32` 截断在这里给出 1.2/错值，py_round_digits 的 min(17) 钳位
+    // 则把 [18,1074] 整段错成 0.0 面。负向：|n| ≥ 309 时 10^|n| 已超 f64
+    // 上限（1.8e308），任何有限值都舍到 ±0.0（round(1.5, -2147483648) ==
+    // 0.0 / round(-1.5, -2147483648) == -0.0），旧实现的 powi(-n) 在这里
+    // 溢出 panic。收窄到 [-308, 1074] 后 i32 强转安全。
+    if n > 1074 {
+        return float_value(f);
+    }
+    if n < -308 {
+        return float_value(0.0f64.copysign(f));
     }
     float_value(py_round_digits(f, n as i32))
 }
@@ -436,7 +468,9 @@ fn py_round_digits(f: f64, n: i32) -> f64 {
         let v: f64 = shifted.parse().unwrap_or(f);
         return v * scale;
     }
-    let n = n.min(17);
+    // 调用方（fn_round）已把 n 收窄到 [0, 1074]：任何 f64 的十进制展开
+    // 至多 1074 位，这个宽度内的 format+parse 就是 Python 的按位舍入。
+    // 旧 min(17) 钳位会把 round(1e-20, 20) 错成 0.0（Python: 1e-20）。
     let s = format!("{:.*}", n as usize, f);
     s.parse().unwrap_or(f)
 }
@@ -1760,5 +1794,75 @@ mod tests {
         assert_eq!(call("$F.mul(3, 4)", e.clone()), json!(12));
         assert_eq!(call("$F.mul(3, 4.5)", e.clone()), json!(13.5));
         assert!(eval_str("$F.mul(9223372036854775807, 2)", &roots(e)).is_err());
+    }
+
+    // -- #7：i64::MIN 取负族（sub/abs）与 round 的 ndigits 值域 --------------
+
+    fn overflow_of(expr: &str, input: Value) -> String {
+        let msg = eval_str(expr, &roots(input))
+            .err()
+            .unwrap_or_else(|| panic!("{expr}: expected OverflowError, got Ok"))
+            .to_string();
+        assert!(msg.starts_with("OverflowError: "), "{expr}: {msg}");
+        msg
+    }
+
+    #[test]
+    fn int_negation_family_is_checked() {
+        // abs(i64::MIN) = 2^63 出 i64 域：与同文件 add/mul/pow 同款 OverflowError
+        //（AGENTS 文档化残余「>i64 报 OverflowError」；Python 给 2**63，plaita-go
+        // 静默回负——负值不落任何允许出口）。字面量与运行期数据两条路径。
+        let min = json!({"a": -9223372036854775808i64});
+        for expr in ["$F.abs(-9223372036854775808)", "$F.abs($INPUT.a)"] {
+            overflow_of(expr, min.clone());
+        }
+        // sub(0, MIN) 真值 2^63 同款；pre-fix 的 -bi 在 MIN 上自身溢出
+        //（release 回绕出静默负值 / debug panic）
+        for expr in ["$F.sub(0, -9223372036854775808)", "$F.sub(0, $INPUT.a)"] {
+            overflow_of(expr, min.clone());
+        }
+        // sub(MIN, MIN) 真值 0 在域内：checked_sub 直接判定（Python: 0，
+        // 不是 OverflowError——不用「先取负再 checked_add」的写法）
+        assert_eq!(call("$F.sub($INPUT.a, $INPUT.a)", min.clone()), json!(0));
+        // 正控：已 checked 的路径不回归
+        overflow_of("$F.sub(-9223372036854775808, 1)", min.clone());
+        overflow_of("$F.add(-9223372036854775808, -1)", min.clone());
+        overflow_of("$F.mul(-9223372036854775808, -1)", min.clone());
+        overflow_of("$F.pow(2, 64)", json!({}));
+        // 常规语义
+        let e = json!({});
+        assert_eq!(call("$F.sub(5, 2)", e.clone()), json!(3));
+        assert_eq!(call("$F.sub(5, 2.5)", e.clone()), json!(2.5));
+        assert_eq!(call("$F.abs(-5)", e.clone()), json!(5));
+        assert_eq!(call("$F.abs(-5.5)", e.clone()), json!(5.5));
+    }
+
+    #[test]
+    fn round_ndigits_domain_is_python_exact() {
+        let e = json!({});
+        // i32 截断钉子（不涉及任何溢出）：4294967297 as i32 == 1 → 旧实现 1.2
+        assert_eq!(
+            call("$F.round(1.2345, 4294967297)", e.clone()),
+            json!(1.2345)
+        );
+        // 2^31 两个方向（pre：debug panic / release OverflowError nan）
+        assert_eq!(call("$F.round(1.5, 2147483648)", e.clone()), json!(1.5));
+        assert_eq!(call("$F.round(1.5, -2147483648)", e.clone()), json!(0.0));
+        // -0.0 符号保留：JSON 数值比较区分不了 ±0，走位型断言
+        let neg0 = call("$F.round(-1.5, -2147483648)", e.clone());
+        assert_eq!(neg0.as_f64().unwrap().to_bits(), (-0.0f64).to_bits());
+        assert_eq!(call("$F.round(1.5, -400)", e.clone()), json!(0.0));
+        // 正向大 n 不是恒等：按位舍入的真实区间语义（1e-20 的有效位在
+        // 第 20 位小数）——旧 min(17) 钳位在这里给出 0.0 错值
+        assert_eq!(call("$F.round(1e-20, 18)", e.clone()), json!(0.0));
+        assert_eq!(call("$F.round(1e-20, 20)", e.clone()), json!(1e-20));
+        assert_eq!(call("$F.round(1e-20, 4294967297)", e.clone()), json!(1e-20));
+        // 正控不回归
+        assert_eq!(call("$F.round(1.5, 0)", e.clone()), json!(2.0));
+        assert_eq!(call("$F.round(1234.5, -3)", e.clone()), json!(1000.0));
+        assert_eq!(call("$F.round(1.5, 20)", e.clone()), json!(1.5));
+        assert_eq!(call("$F.round(2.5)", e.clone()), json!(2));
+        assert_eq!(call("$F.round(1.2345, 2)", e.clone()), json!(1.23));
+        assert_eq!(call("$F.round(3, 1)", e.clone()), json!(3));
     }
 }
