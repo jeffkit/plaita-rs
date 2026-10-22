@@ -526,6 +526,7 @@ version = "0.1.0"
 dependencies = [
  "form_urlencoded",
  "indexmap",
+ "libc",
  "plaita-expression",
  "serde",
  "serde_json",

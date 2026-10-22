@@ -595,3 +595,57 @@ fn http_node_honours_flow_deadline() {
     // 归 Timeout 类（timeoutHandler 可接住），不再一律 1002 瞬态
     assert!(!err.to_string().contains("code: 1002"), "{err}");
 }
+
+/// code 节点超时必须杀掉整个进程组（issue #2）：sidecar 用
+/// `process_group(0)` 建了自己的组，超时清理先前只 `child.kill()` 直接子
+/// 进程——sidecar spawn 的孙进程全部存活并被 reparent 到 PID 1，错误文案
+/// 却声称 "process tree killed"。
+#[test]
+fn code_timeout_kills_whole_process_group() {
+    // 孙进程 argv 内嵌唯一标记，跑完后用 ps 断言其消失
+    let marker = format!("plaita_rs_gc_{}", std::process::id());
+    let data = format!(
+        r#"{{
+        "flow_id": "code_group_kill",
+        "nodes": [
+            {{"type": "start", "id": "s", "next": "k"}},
+            {{"type": "code", "id": "k", "language": "python", "next": "e",
+             "timeout": "PT1S",
+             "code": "import subprocess, time\nsubprocess.Popen(['python3', '-c', 'import time; time.sleep(777)  # {marker}'])\ndef run(input):\n    time.sleep(60)",
+             "input": {{}}}},
+            {{"type": "end", "id": "e", "resultType": "success", "output": "$NODE.k"}}
+        ]}}"#
+    );
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let err = flow.execute(&json!({}), &Host::new()).unwrap_err();
+    assert!(err.to_string().contains("timed out"), "{err}");
+
+    // 超时后进程组内不得有存活者（SIGKILL 生效是即时的，给 2s 轮询宽限）
+    let gc_gone = (0..40).all(|_| {
+        let out = std::process::Command::new("ps")
+            .args(["-eo", "command"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        !text.lines().any(|l| l.contains(&marker)) || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            false
+        }
+    });
+    assert!(
+        gc_gone,
+        "grandchild spawned by the sidecar must die with the process \
+         group; leaked: {}",
+        {
+            let out = std::process::Command::new("ps")
+                .args(["-eo", "pid,ppid,pgid,command"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| l.contains(&marker))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        }
+    );
+}

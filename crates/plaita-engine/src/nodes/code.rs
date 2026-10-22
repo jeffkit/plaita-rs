@@ -298,9 +298,9 @@ enum WaitOutcome {
     Failed(String),
 }
 
-/// Waits with a wall clock; on timeout kills the child (its own process
-/// group on unix when spawned with setsid — we keep the simple kill here;
-/// grandchildren are out of scope for the bare engine).
+/// Waits with a wall clock; on timeout kills the child's whole process
+/// group (`process_group(0)` made the sidecar its own group leader, so the
+/// signal takes any grandchildren the user code spawned too).
 fn wait_with_timeout(mut child: std::process::Child, budget: Duration) -> WaitOutcome {
     let deadline = Instant::now() + budget;
     loop {
@@ -320,8 +320,7 @@ fn wait_with_timeout(mut child: std::process::Child, budget: Duration) -> WaitOu
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_process_group(&mut child);
                     return WaitOutcome::TimedOut;
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -329,6 +328,29 @@ fn wait_with_timeout(mut child: std::process::Child, budget: Duration) -> WaitOu
             Err(e) => return WaitOutcome::Failed(e.to_string()),
         }
     }
+}
+
+/// SIGKILLs the sidecar's process group, then reaps the direct child.
+#[cfg(unix)]
+fn kill_process_group(child: &mut std::process::Child) {
+    // process_group(0) made the child a group leader, so -pid addresses the
+    // whole tree
+    let pgid = -(child.id() as i32);
+    // SAFETY: kill(2) with a negative pid is the process-group signal form;
+    // no invariants beyond a live pid are required.
+    let killed = unsafe { libc::kill(pgid, libc::SIGKILL) };
+    if killed != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+        // ESRCH means the tree already exited between try_wait and the kill;
+        // any other failure still takes the direct child down
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Parses the JSON envelope written by the runner — verbatim port of plaita
