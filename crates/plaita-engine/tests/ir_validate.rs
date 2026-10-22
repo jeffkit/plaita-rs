@@ -876,3 +876,36 @@ fn typed_field_positive_controls_unchanged() {
     // joinBranches:null 同缺省（Go null → 零值同语义）
     assert!(load(parallel_join_doc(json!(Value::Null), json!(null))).is_ok());
 }
+
+// -- ISO 时长严格度（#13：乱序/重复分量具名拒，预算不再被静默改写）--------------
+
+#[test]
+fn iso_timeout_bad_component_spelling_rejected_at_load() {
+    // 五份 issue 实测文档：pre-fix 全部 {"ok":true}（Go/Python 侧装载即拒）
+    for t in ["PT1S1H", "PT1H1H", "P1D1D", "PT1M1H", "PT1S1S"] {
+        let doc = json!({
+            "flowId": "tmo",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "a"},
+                {"type": "assignment", "id": "a", "next": "e", "timeout": t},
+                {"type": "end", "id": "e"}
+            ]
+        });
+        let err = err_of(doc);
+        assert!(
+            err.contains("could not parse duration string"),
+            "{t}: {err}"
+        );
+    }
+
+    // 正控：合法跳分量拼写装载通过
+    let doc = json!({
+        "flowId": "tmo",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "a"},
+            {"type": "assignment", "id": "a", "next": "e", "timeout": "PT1H1S"},
+            {"type": "end", "id": "e"}
+        ]
+    });
+    assert!(load(doc).is_ok());
+}
