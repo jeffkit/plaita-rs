@@ -552,3 +552,100 @@ fn loop_condition_breaks_early() {
     let got = flow.execute(&json!({}), &Host::new()).unwrap();
     assert_eq!(got, json!(40));
 }
+
+/// http 节点必须接住流程/父节点预算（issue #3）：请求超时 =
+/// min(node.timeout, deadline)。先前 deadline 被丢弃——请求跑满对端的
+/// 5s，返回后错误才记到撞上过期 deadline 的下一个节点头上。
+#[test]
+fn http_node_honours_flow_deadline() {
+    // 测试内自建慢服务：accept 后搁置 5s 才回 200
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            use std::io::Write;
+            let _ = sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\nok",
+            );
+        }
+    });
+
+    let data = format!(
+        r#"{{
+        "flow_id": "http_deadline",
+        "timeout": "PT1S",
+        "nodes": [
+            {{"type": "start", "id": "s", "next": "h"}},
+            {{"type": "http", "id": "h", "url": "http://{addr}/x", "next": "e"}},
+            {{"type": "end", "id": "e", "resultType": "success", "output": "$NODE.h.status"}}
+        ]}}"#
+    );
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let t0 = std::time::Instant::now();
+    let err = flow.execute(&json!({}), &Host::new()).unwrap_err();
+    let elapsed = t0.elapsed();
+    // 预算 1s 生效：不能跑满对端的 5s
+    assert!(
+        elapsed < std::time::Duration::from_millis(2500),
+        "flow budget must bound the request, elapsed {elapsed:?}"
+    );
+    // 超时归因 http 节点本身，而不是下一个撞上过期 deadline 的节点
+    assert!(err.to_string().contains("node \"h\" (http)"), "{err}");
+    // 归 Timeout 类（timeoutHandler 可接住），不再一律 1002 瞬态
+    assert!(!err.to_string().contains("code: 1002"), "{err}");
+}
+
+/// code 节点超时必须杀掉整个进程组（issue #2）：sidecar 用
+/// `process_group(0)` 建了自己的组，超时清理先前只 `child.kill()` 直接子
+/// 进程——sidecar spawn 的孙进程全部存活并被 reparent 到 PID 1，错误文案
+/// 却声称 "process tree killed"。
+#[test]
+fn code_timeout_kills_whole_process_group() {
+    // 孙进程 argv 内嵌唯一标记，跑完后用 ps 断言其消失
+    let marker = format!("plaita_rs_gc_{}", std::process::id());
+    let data = format!(
+        r#"{{
+        "flow_id": "code_group_kill",
+        "nodes": [
+            {{"type": "start", "id": "s", "next": "k"}},
+            {{"type": "code", "id": "k", "language": "python", "next": "e",
+             "timeout": "PT1S",
+             "code": "import subprocess, time\nsubprocess.Popen(['python3', '-c', 'import time; time.sleep(777)  # {marker}'])\ndef run(input):\n    time.sleep(60)",
+             "input": {{}}}},
+            {{"type": "end", "id": "e", "resultType": "success", "output": "$NODE.k"}}
+        ]}}"#
+    );
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let err = flow.execute(&json!({}), &Host::new()).unwrap_err();
+    assert!(err.to_string().contains("timed out"), "{err}");
+
+    // 超时后进程组内不得有存活者（SIGKILL 生效是即时的，给 2s 轮询宽限）
+    let gc_gone = (0..40).all(|_| {
+        let out = std::process::Command::new("ps")
+            .args(["-eo", "command"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        !text.lines().any(|l| l.contains(&marker)) || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            false
+        }
+    });
+    assert!(
+        gc_gone,
+        "grandchild spawned by the sidecar must die with the process \
+         group; leaked: {}",
+        {
+            let out = std::process::Command::new("ps")
+                .args(["-eo", "pid,ppid,pgid,command"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| l.contains(&marker))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        }
+    );
+}

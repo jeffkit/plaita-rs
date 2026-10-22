@@ -120,6 +120,7 @@ pub fn execute_node_body(
                         headers.as_ref(),
                         body.as_ref(),
                         rc,
+                        deadline,
                     )
                 } else {
                     unreachable!()

@@ -23,3 +23,8 @@ uuid = { workspace = true }
 url = "2"
 form_urlencoded = "1"
 ureq = { workspace = true, optional = true }
+
+# process-group kill for the code sidecar's timeout cleanup (unix only,
+# mirroring the cfg(unix) process_group(0) spawn)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

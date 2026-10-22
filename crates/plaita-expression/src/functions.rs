@@ -228,7 +228,11 @@ fn fn_mod(args: &[Value]) -> Result<Value, EvalError> {
         if bi == 0 {
             return Err(EvalError::zero_division("$F.mod: division by zero"));
         }
-        let mut r = ai % bi;
+        // Rust guarantees a panic for i64::MIN % -1 in every profile; Python
+        // and plaita-go both yield 0 here (Go's two's-complement wrap
+        // coincides with CPython's -2**63 % -1 == 0), and 0 is inside the
+        // i64 domain — no f64 fallback involved.
+        let mut r = ai.checked_rem(bi).unwrap_or(0);
         if r != 0 && (r < 0) != (bi < 0) {
             r += bi;
         }
@@ -1323,6 +1327,30 @@ mod tests {
     /// Evaluates with the expression context {INPUT: input}.
     fn call(expr: &str, input: Value) -> Value {
         eval_str(expr, &roots(input)).unwrap()
+    }
+
+    #[test]
+    fn mod_i64_min_minus_one_is_zero() {
+        // Rust defines i64::MIN % -1 as a panic in every profile; Python and
+        // plaita-go both yield 0 (Go's two's-complement wrap coincides with
+        // CPython's -2**63 % -1 == 0) and 0 is inside the i64 domain.
+        let e = json!({});
+        assert_eq!(
+            call("$F.mod(-9223372036854775808, -1)", e.clone()),
+            json!(0)
+        );
+        assert_eq!(
+            call(
+                "$F.mod($INPUT.a, $INPUT.b)",
+                json!({"a": -9223372036854775808i64, "b": -1})
+            ),
+            json!(0)
+        );
+        // sign-follows-divisor semantics unchanged
+        assert_eq!(call("$F.mod(7, 3)", e.clone()), json!(1));
+        assert_eq!(call("$F.mod(-7, 3)", e.clone()), json!(2));
+        assert_eq!(call("$F.mod(7, -3)", e.clone()), json!(-2));
+        assert_eq!(call("$F.mod('x=%d', 5)", e.clone()), json!("x=5"));
     }
 
     #[test]
