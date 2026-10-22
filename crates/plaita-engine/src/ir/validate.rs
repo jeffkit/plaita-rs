@@ -21,7 +21,7 @@ use plaita_expression::function_names;
 use crate::budget::{MAX_NODE_TIMEOUT, MAX_NODE_TIMEOUT_TEXT, MAX_RETRY_TIMES};
 use crate::duration;
 use crate::ir::scope::Scope;
-use crate::ir::support::{first_any, get_str, node_label};
+use crate::ir::support::{first_any, get_str, node_label, type_name};
 use crate::property::Property;
 
 pub fn validate_doc(doc: &Value, scope: Scope) -> Result<(), String> {
@@ -74,8 +74,20 @@ pub fn validate_doc(doc: &Value, scope: Scope) -> Result<(), String> {
     let mut ends: HashSet<String> = HashSet::new();
     for n in &node_objs {
         let id = get_str(n, &["id"]).unwrap_or_default();
-        if let Some(next) = get_str(n, &["next"]).filter(|s| !s.is_empty()) {
-            edges.entry(id.clone()).or_default().push(next);
+        // 类型错误的 next 不产生边会让 R1/R3 全绿假象（#9）——present 但非
+        // 字符串即具名拒；null/空串仍是合法「无后继」
+        match n.get("next") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(next)) if !next.is_empty() => {
+                edges.entry(id.clone()).or_default().push(next.clone());
+            }
+            Some(Value::String(_)) => {}
+            Some(other) => {
+                return Err(format!(
+                    "ir: flow {flow_id:?}: node {id:?}: field \"next\" must be a string, got {}",
+                    type_name(other)
+                ));
+            }
         }
         match get_str(n, &["type"]).as_deref() {
             Some("switch") => {
@@ -139,7 +151,8 @@ pub fn validate_doc(doc: &Value, scope: Scope) -> Result<(), String> {
         }
     }
 
-    // parallel joinBranches ⊆ branches[].name
+    // parallel joinBranches ⊆ branches[].name（#9：present 非数组/元素非字符串
+    // 具名拒，不再 and_then(as_array) 静默跳过；null 同缺省）
     for n in &node_objs {
         if get_str(n, &["type"]).as_deref() != Some("parallel") {
             continue;
@@ -153,18 +166,31 @@ pub fn validate_doc(doc: &Value, scope: Scope) -> Result<(), String> {
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(joins) =
-            first_any(n, &["joinBranches", "join_branches"]).and_then(|j| j.as_array())
-        {
-            for j in joins {
-                if let Some(s) = j.as_str() {
+        let nid = get_str(n, &["id"]).unwrap_or_default();
+        match first_any(n, &["joinBranches", "join_branches"]) {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(joins)) => {
+                for (i, j) in joins.iter().enumerate() {
+                    let Some(s) = j.as_str() else {
+                        return Err(format!(
+                            "ir: flow {flow_id:?}: parallel {nid:?}: joinBranches[{i}] must be a \
+                             branch name string, got {}",
+                            type_name(j)
+                        ));
+                    };
                     if !names.contains(s) {
-                        let nid = get_str(n, &["id"]).unwrap_or_default();
                         return Err(format!(
                             "ir: flow {flow_id:?}: parallel {nid:?} joins unknown branch {s:?}"
                         ));
                     }
                 }
+            }
+            Some(other) => {
+                return Err(format!(
+                    "ir: flow {flow_id:?}: parallel {nid:?}: joinBranches must be an array of \
+                     branch names, got {}",
+                    type_name(other)
+                ));
             }
         }
     }

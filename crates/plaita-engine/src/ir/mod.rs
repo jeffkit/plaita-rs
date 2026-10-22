@@ -70,6 +70,43 @@ impl Flow {
     }
 }
 
+/// Typed-field gate (#9): a present-but-wrong-type field is a load error with
+/// the same strictness as Go's typed unmarshal / Python's pydantic models.
+/// The old `as_*().unwrap_or_default()` accessors silently degraded to empty
+/// values — an empty `joinBranches` flips parallel into fire-and-forget
+/// (results dropped), empty `branches` drops every branch — and none of it
+/// was visible to the structural rules. `null` and absent stay legal (Go
+/// unmarshal treats JSON null as "leave the zero value").
+fn want_string_field(
+    node_id: &str,
+    field: &str,
+    v: Option<&Value>,
+) -> Result<Option<String>, String> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(format!(
+            "node {node_id:?}: field {field:?} must be a string, got {}",
+            support::type_name(other)
+        )),
+    }
+}
+
+fn want_array_field<'a>(
+    node_id: &str,
+    field: &str,
+    v: Option<&'a Value>,
+) -> Result<Option<&'a Vec<Value>>, String> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(a)) => Ok(Some(a)),
+        Some(other) => Err(format!(
+            "node {node_id:?}: field {field:?} must be an array, got {}",
+            support::type_name(other)
+        )),
+    }
+}
+
 /// Builds a `Node` from a normalized node document (the type-tagged
 /// deserialization `serde` cannot express with mixed spellings).
 pub(crate) fn node_from_value(v: &Value) -> Result<Node, String> {
@@ -82,17 +119,18 @@ pub(crate) fn node_from_value(v: &Value) -> Result<Node, String> {
     if node_type.is_empty() {
         return Err("missing type".to_string());
     }
+    let node_id = get_str("id");
 
     let base = BaseFields {
-        id: get_str("id"),
+        id: node_id.clone(),
         node_type: node_type.clone(),
         name: get_str("name"),
         desc: get_str("desc"),
         output: get("output").cloned().filter(|v| !v.is_null()),
         timeout: match get("timeout") {
-            Some(Value::String(s)) if !s.is_empty() => Some(
-                duration::parse_iso8601(s).map_err(|e| format!("node {:?}: {e}", get_str("id")))?,
-            ),
+            Some(Value::String(s)) if !s.is_empty() => {
+                Some(duration::parse_iso8601(s).map_err(|e| format!("node {node_id:?}: {e}"))?)
+            }
             _ => None,
         },
         error_policy: match get("errorHandler") {
@@ -103,10 +141,7 @@ pub(crate) fn node_from_value(v: &Value) -> Result<Node, String> {
             Some(h) => serde_json::from_value(h.clone()).map_err(|e| e.to_string())?,
             None => Default::default(),
         },
-        next: get("next")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty()),
+        next: want_string_field(&node_id, "next", get("next"))?.filter(|s| !s.is_empty()),
         output_type: match get("outputType") {
             Some(p) if p.is_object() && !p.as_object().unwrap().is_empty() => {
                 Some(serde_json::from_value::<Property>(p.clone()).map_err(|e| e.to_string())?)
@@ -130,7 +165,7 @@ pub(crate) fn node_from_value(v: &Value) -> Result<Node, String> {
             },
         },
         "assignment" => NodeKind::Assignment {
-            upstream_output: match get("upstreamOutput").and_then(|u| u.as_array()) {
+            upstream_output: match want_array_field(&node_id, "upstreamOutput", get("upstreamOutput"))? {
                 Some(u) => u
                     .iter()
                     .map(|x| {
@@ -138,27 +173,28 @@ pub(crate) fn node_from_value(v: &Value) -> Result<Node, String> {
                             .map_err(|e| e.to_string())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
-                _ => Vec::new(),
+                None => Vec::new(),
             },
         },
         "switch" => NodeKind::Switch {
-            branches: get("branches")
-                .and_then(|b| b.as_array())
-                .map(|a| {
-                    a.iter()
-                        .map(|x| {
-                            serde_json::from_value::<BranchDefShim>(x.clone())
-                                .map_err(|e| e.to_string())
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()?
-                .map(|v: Vec<BranchDefShim>| v.into_iter().map(|s| s.inner).collect())
-                .unwrap_or_default(),
+            branches: match want_array_field(&node_id, "branches", get("branches"))? {
+                Some(a) => a
+                    .iter()
+                    .map(|x| {
+                        serde_json::from_value::<BranchDefShim>(x.clone())
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .map(|s| s.inner)
+                    .collect(),
+                None => Vec::new(),
+            },
         },
         "if" => NodeKind::If {
             condition: get("condition").cloned().filter(|c| !c.is_null()),
-            else_next: get_str("else_next"),
+            else_next: want_string_field(&node_id, "else_next", get("else_next"))?
+                .unwrap_or_default(),
         },
         "loop" => NodeKind::Loop {
             collection: match get("collection") {
@@ -176,30 +212,34 @@ pub(crate) fn node_from_value(v: &Value) -> Result<Node, String> {
             child_flow: child_flow_of(obj)?,
         },
         "parallel" => NodeKind::Parallel {
-            branches: get("branches")
-                .and_then(|b| b.as_array())
-                .map(|a| {
-                    a.iter()
-                        .map(|x| {
-                            serde_json::from_value::<ParallelBranchDef>(x.clone())
-                                .map_err(|e| e.to_string())
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
+            branches: match want_array_field(&node_id, "branches", get("branches"))? {
+                Some(a) => a
+                    .iter()
+                    .map(|x| {
+                        serde_json::from_value::<ParallelBranchDef>(x.clone())
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                None => Vec::new(),
+            },
             is_conditional: get("isConditional")
                 .and_then(|b| b.as_bool())
                 .unwrap_or(false),
             mode: get_str("mode"),
-            join_branches: get("joinBranches")
-                .and_then(|j| j.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            join_branches: match want_array_field(&node_id, "joinBranches", get("joinBranches"))? {
+                Some(a) => a
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| match x {
+                        Value::String(s) => Ok(s.clone()),
+                        other => Err(format!(
+                            "node {node_id:?}: field \"joinBranches[{i}]\" must be a string, got {}",
+                            support::type_name(other)
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                None => Vec::new(),
+            },
         },
         "child" => NodeKind::Child {
             child_flow: child_flow_of(obj)?,
