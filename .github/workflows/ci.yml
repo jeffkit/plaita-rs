@@ -82,5 +82,11 @@ jobs:
           rustup override set 1.98.1
       - name: node parity
         run: |
-          python3 scripts/extract_python_node_types.py             --plaita plaita --plaita-nodes plaita-nodes --out node_types.json
-          PLAITA_NODE_TYPES_JSON=node_types.json             cargo test -p plaita-engine --test node_type_parity
+          # Absolute path: cargo test runs test binaries with cwd set to the
+          # package dir (crates/plaita-engine), so a relative path would not
+          # resolve there (first CI run proved it the hard way).
+          python3 scripts/extract_python_node_types.py \
+            --plaita plaita --plaita-nodes plaita-nodes \
+            --out "$PWD/node_types.json"
+          PLAITA_NODE_TYPES_JSON="$PWD/node_types.json" \
+            cargo test -p plaita-engine --test node_type_parity
