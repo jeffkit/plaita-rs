@@ -102,8 +102,9 @@ pub enum FlowError {
         message: String,
         cause: Box<FlowError>,
     },
-    /// The flow-level budget fired (after the timeout policy declined to
-    /// soften it).
+    /// The flow-level budget fired. Terminal by contract (issue #14,
+    /// mirroring plaita's ExecutionDeadlineError): node timeout/error
+    /// policies and the flow-level timeoutHandler never soften it.
     FlowTimeout { message: String },
     /// Engine-level failures (reentry, missing node, ...).
     Other(String),

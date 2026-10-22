@@ -261,12 +261,20 @@ fn run_python_subprocess(
         .spawn()
         .map_err(|e| NodeError::deterministic(format!("python sidecar: {e}")))?;
 
-    if let Some(stdin) = child.stdin.as_mut() {
-        let _ = stdin.write_all(&input_json);
-    }
-    child.stdin.take(); // close stdin so the runner's read() returns
+    // stdin 写入移出主等待路径（#15，镜像 plaita _popen_wait_cancellable
+    // 的 communicate-in-deadloop）：先前阻塞 write_all 在 wait_with_timeout
+    // 之前执行、游离于全部预算之外——子进程不读 stdin（runner 模板里用户
+    // 代码先于 stdin.read() 执行）且载荷超过管道容量时无限挂死，节点/流/
+    // 沙箱三个预算全失效，还留孤儿进程组。写入交给独立线程（写完 drop
+    // 关 stdin，等价先前的 take()），寿命由 wait_with_timeout 的 deadline
+    // 统一管辖：killpg 后管道关闭，write_all 以 EPIPE 返回。
+    let writer: Option<std::thread::JoinHandle<()>> = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input_json);
+        })
+    });
 
-    let timeout_result = wait_with_timeout(child, budget);
+    let timeout_result = wait_with_timeout(child, budget, writer);
     match timeout_result {
         WaitOutcome::TimedOut => Err(NodeError::timeout(format!(
             "Subprocess sandbox timed out after {}s (process tree killed). \
@@ -300,10 +308,17 @@ enum WaitOutcome {
 
 /// Waits with a wall clock; on timeout kills the child's whole process
 /// group (`process_group(0)` made the sidecar its own group leader, so the
-/// signal takes any grandchildren the user code spawned too).
-fn wait_with_timeout(mut child: std::process::Child, budget: Duration) -> WaitOutcome {
+/// signal takes any grandchildren the user code spawned too). The stdin
+/// writer thread (issue #15) is joined on every exit path — after the
+/// group kill its write target is closed, so `write_all` returns (EPIPE)
+/// and the join cannot outlive the budget.
+fn wait_with_timeout(
+    mut child: std::process::Child,
+    budget: Duration,
+    writer: Option<std::thread::JoinHandle<()>>,
+) -> WaitOutcome {
     let deadline = Instant::now() + budget;
-    loop {
+    let outcome = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let mut stdout = Vec::new();
@@ -316,18 +331,27 @@ fn wait_with_timeout(mut child: std::process::Child, budget: Duration) -> WaitOu
                     use std::io::Read;
                     let _ = err.read_to_end(&mut stderr);
                 }
-                return WaitOutcome::Done(status, stdout, stderr);
+                break WaitOutcome::Done(status, stdout, stderr);
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     kill_process_group(&mut child);
-                    return WaitOutcome::TimedOut;
+                    break WaitOutcome::TimedOut;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(e) => return WaitOutcome::Failed(e.to_string()),
+            Err(e) => {
+                // try_wait 失败 = 子进程状态不可知；与超时同款收尸再退出，
+                // 否则写线程（与子进程共享管道）可能把宿主一并拖住
+                kill_process_group(&mut child);
+                break WaitOutcome::Failed(e.to_string());
+            }
         }
+    };
+    if let Some(writer) = writer {
+        let _ = writer.join();
     }
+    outcome
 }
 
 /// SIGKILLs the sidecar's process group, then reaps the direct child.
@@ -449,5 +473,78 @@ mod tests {
         std::env::set_var(PY_SANDBOX_MEMORY_ENV, "-1");
         assert_eq!(sandbox_memory_mb().unwrap(), -1);
         std::env::remove_var(PY_SANDBOX_MEMORY_ENV);
+    }
+
+    /// stdin 写入必须在预算内（issue #15 负控）：大载荷（> 管道容量）+
+    /// 子进程模块级阻塞（runner 模板里用户代码先于 stdin.read() 执行）时，
+    /// 先前的阻塞 write_all 让节点/流/沙箱三个预算全部失效——永久挂死
+    /// 且留孤儿进程组。修后 2s 节点预算兜底：具名 Timeout、无孤儿。
+    #[test]
+    fn stdin_write_is_inside_the_budget() {
+        let marker = format!("plaita_rs_stdin_{}", std::process::id());
+        let data = format!(
+            r#"{{
+        "flow_id": "p2-stdin-budget",
+        "nodes": [
+            {{"type": "start", "id": "s", "next": "c"}},
+            {{"type": "code", "id": "c", "language": "python", "next": "e",
+             "timeout": "PT2S",
+             "code": "import time\ntime.sleep(60)  # {marker}\ndef run(input):\n    return input",
+             "input": {{"blob": "$INPUT.blob"}}}},
+            {{"type": "end", "id": "e", "resultType": "success", "output": "'ok'"}}
+        ]}}"#
+        );
+        let flow = crate::ir::load(data.as_bytes()).unwrap();
+        // 200KB 压过 64KB 管道容量，写必然阻塞在子进程 read 之前
+        let big = "x".repeat(200_000);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t0 = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let r = flow.execute(
+                &serde_json::json!({ "blob": big }),
+                &crate::exec::Host::new(),
+            );
+            let _ = tx.send((t0.elapsed(), r));
+        });
+        // 30s 只兜底「预算被绕过」的失败窗口；预算内应收在 ~2s
+        let (elapsed, result) = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap_or_else(|_| {
+                pkill_marker(&marker);
+                panic!(
+                    "stdin write escaped every budget: the flow never returned \
+                     (blocking write_all outside the deadline loop)"
+                )
+            });
+        let err = result.expect_err("blocked-forever sidecar must fail, not succeed");
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected the named Timeout class, got: {err}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "budget must fire at ~2s, took {elapsed:?}"
+        );
+
+        // 无孤儿：sidecar 进程组内标记进程必须消失（SIGKILL 即时，2s 宽限）
+        let gone = (0..40).all(|_| {
+            let out = std::process::Command::new("ps")
+                .args(["-eo", "command"])
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            !text.lines().any(|l| l.contains(&marker)) || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                false
+            }
+        });
+        assert!(gone, "sidecar process group must not outlive the timeout");
+    }
+
+    fn pkill_marker(marker: &str) {
+        let _ = std::process::Command::new("pkill")
+            .args(["-9", "-f", marker])
+            .output();
     }
 }
