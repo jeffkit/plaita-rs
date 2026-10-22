@@ -160,7 +160,7 @@ Rust-only `code`（Python 刻意 opt-in 注册）。负控双实证：权威清�
 ```bash
 # 参照侧：Go runner（依赖本机 plaita-go checkout；首次需
 #   cd tools/go-ref && GOPROXY=https://goproxy.cn,direct GOSUMDB=off go mod tidy && go build -o ../go-ref-bin .）
-python3 tools/diffcheck.py     # 16/16 用例与 plaita-go 双跑一致（2026-10-23 复核）
+python3 tools/diffcheck.py     # 23/23 用例与 plaita-go 双跑一致（2026-10-23；known-red 两案随 G-1 修口翻绿转正）
 ```
 
 用例覆盖：plaita codeflow 编译器真产物（loop/parallel/child）、console 真实导出
