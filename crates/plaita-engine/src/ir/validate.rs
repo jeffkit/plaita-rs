@@ -29,12 +29,10 @@ pub fn validate_doc(doc: &Value, scope: Scope) -> Result<(), String> {
         return Err("ir: flow document must be an object".to_string());
     };
     let flow_id = get_str(doc_obj, &["id"]).unwrap_or_default();
-    // Budget caps: the flow-level retryTimes shares the node-level cap. The
-    // flow-level timeout is deliberately NOT capped: an explicit flow timeout
-    // is an operator's budget decision（Go validateDoc 入口先查 flow 级）。
-    if let Some(h) = doc_obj.get("errorHandler").and_then(|h| h.as_object()) {
-        check_retry_times_cap(&flow_id, h, "flow")?;
-    }
+    // 流级 errorHandler 不是本引擎契约面（B4 r7）：plaita 的 Flow 模型无该
+    // 字段，整流重投 ×(1+n) 是刻意不实现的 Go-ism——该键不再有 cap 校验，
+    // 走 stash_unknown_flow_fields 的警告+metadata 通道。节点级 cap 不变
+    // （Go checkRetryTimesCap 同款）。flow 级 timeout 有意不 cap。
     let Some(nodes) = doc_obj.get("nodes").and_then(|n| n.as_array()) else {
         return Err(format!("ir: flow {flow_id:?}: nodes missing"));
     };
@@ -237,8 +235,9 @@ fn check_budget_caps(flow_id: &str, n: &Map<String, Value>) -> Result<(), String
     Ok(())
 }
 
-/// `workflow.MaxRetryTimes` applied to one handler object, naming the owner
-/// (`flow` / `node "<id>"`) — Go checkRetryTimesCap 的同款文案。
+/// `workflow.MaxRetryTimes` applied to one NODE handler object — Go
+/// checkRetryTimesCap 的同款文案（B4 r7 起 owner 恒为节点：flow 级
+/// errorHandler 已随整流重投一并撤出契约面）。
 fn check_retry_times_cap(
     flow_id: &str,
     handler: &Map<String, Value>,
@@ -592,6 +591,39 @@ fn is_static_value(v: &Value) -> bool {
 }
 
 // --- unknown node key hygiene (ports warn_unknown_keys) ---
+
+/// 流级未知键卫生（B4 r7）：plaita 的 Flow 模型没有流级 `errorHandler`——
+/// 整流重投 ×(1+n) 是刻意不实现的 Go-ism（Python flow.py 无该字段，顶层
+/// errorHandler=未知键 warning+忽略，流恒单次执行）。引擎对该键（两拼写）
+/// 点名告警 + 落 metadata.unknownFields——把沉默变可见；字段本身被忽略，
+/// 不再参与任何装载校验（流级 retryTimes cap 一并撤除）。
+pub(crate) fn stash_unknown_flow_fields(doc: &mut Value) {
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    let found: Vec<String> = ["errorHandler", "error_handler"]
+        .iter()
+        .filter(|k| obj.contains_key(**k))
+        .map(|k| k.to_string())
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    let flow_id = get_str(obj, &["id"]).unwrap_or_default();
+    eprintln!(
+        "[ir] flow {flow_id:?}: flow-level errorHandler ({}) is not part of this engine's \
+         contract and will be IGNORED (plaita has no flow-level error handling; the Go \
+         whole-flow retryTimes re-run is deliberately not implemented — the flow runs exactly \
+         once). Move it onto the nodes that need it.",
+        found.join(", ")
+    );
+    let meta = obj
+        .entry("metadata")
+        .or_insert_with(|| Value::Object(Default::default()));
+    if let Some(m) = meta.as_object_mut() {
+        m.insert("unknownFields".into(), Value::String(found.join(",")));
+    }
+}
 
 /// The JSON keys each node type accepts (mirrors the Go node structs; the
 /// loader itself adds `metadata` during normalization).

@@ -98,118 +98,113 @@ impl Host {
     }
 }
 
-const FLOW_RETRY_DELAY: Duration = Duration::from_millis(10);
 const NODE_BACKOFF_BASE: Duration = Duration::from_secs(1);
 const NODE_BACKOFF_CAP: Duration = Duration::from_secs(30);
 
 impl Flow {
     /// Executes the flow with the given input.
     ///
-    /// The flow's own error policy `retryTimes` multiplies WHOLE-FLOW
-    /// re-executions (fixed 10ms delay) for transient faults only — the
-    /// plaita exponential backoff and per-node retry classification live at
-    /// the node level. An explicit zero budget (or an already-expired
-    /// deadline) fails immediately instead of letting budget-ignoring node
-    /// bodies run to completion (plaita#138).
+    /// The flow runs EXACTLY ONCE: plaita has no flow-level error handler —
+    /// the authoritative `Flow` model (core/flow.py) has no such field and a
+    /// top-level `errorHandler` key in a flow document is an unknown key
+    /// (warning + ignored). The Go whole-flow `retryTimes` re-run (×(1+n)
+    /// re-executions, replaying every side-effecting node, letting a child's
+    /// transient error burn the flow budget) is a deliberate Go-ism this
+    /// engine does not implement (B4 r7). Node-level retry/backoff/error
+    /// policies are unaffected; an explicit zero budget (or an
+    /// already-expired deadline) fails immediately instead of letting
+    /// budget-ignoring node bodies run to completion (plaita#138).
     pub fn execute(&self, input: &Value, host: &Host) -> Result<Value, FlowError> {
-        // 有意分歧（与 Go 对照）：Go 在 Execute 入口 prepare 一次运行时上下文、
-        // 流级重试轮复用（上一轮的 $NODE/$ERROR 残留进重试轮）；本引擎每轮
-        // 重建干净上下文——重试轮不应看到失败轮的中间态。依赖该残留的 flow
-        // 属于反模式（见 exec 模块注释）。
+        // 流上下文一次性新建（B4 r7 起无流级重试轮——「重试轮复用残留」的
+        // Go 对照面随整流重投撤除而消失；子流/分支走 execute_on 共享 rc）。
+        //
+        // 执行级缺省预算（plaita#267，Python strategies.py:144
+        // `execution_deadline_ms`）：显式 timeout 缺省时补 1800s 总预算
+        // （PLAITA_EXECUTION_DEADLINE_SECONDS 可调，非法值回退默认并告警），
+        // 无 timeout 的 flow 不再无限占用执行线程。显式 `PT0S` 仍是显式零
+        // 预算（最严，plaita#138），不会被当成缺省。
+        //
         // 装载期（normalize_timeout）已拒掉超平台 Instant 值域的预算；这里的
         // checked_add 是程序化构造 Flow 的防御面——裸加在两种 profile 都是
         // 进程级 panic（r1 移交点），具名错误 fail-closed。
-        let flow_deadline = match self.timeout {
-            None => None,
-            Some(t) => match Instant::now().checked_add(t) {
-                Some(dl) => Some(dl),
-                None => {
-                    return Err(FlowError::Other(format!(
-                        "flow timeout {} exceeds the platform instant range: the budget is \
-                         representable but no runtime deadline can be formed from it",
-                        crate::duration::to_iso(t)
-                    )))
-                }
-            },
-        };
-        let mut attempt: u64 = 0;
-        loop {
-            let rc = RuntimeCtx::new_execution(
-                None,
-                input.clone(),
-                Some(&self.id),
-                self.context
-                    .global
-                    .as_ref()
-                    .and_then(|g| g.as_object().cloned()),
-                self.expose_env.as_ref(),
-                host.execution_id.as_deref(),
-                flow_deadline,
-            );
-            host.emit(Event::FlowStart {
-                flow_id: self.id.clone(),
-            });
-            let result: Result<Value, FlowError> = match flow_deadline {
-                Some(dl) if Instant::now() >= dl => Err(FlowError::FlowTimeout {
-                    message: "context deadline exceeded".to_string(),
-                }),
-                _ => self.run_nodes(&rc, host, flow_deadline),
-            };
-            let (result_value, error_text) = match &result {
-                Ok(v) => (Some(v.clone()), None),
-                Err(e) => (None, Some(e.to_string())),
-            };
-            host.emit(Event::FlowEnd {
-                flow_id: self.id.clone(),
-                result: result_value,
-                error: error_text,
-            });
-            match result {
-                Ok(v) => return Ok(v),
-                // 流级预算到期 = 终态（#14）：timeoutHandler 不拦截。
-                // Python 权威侧无流级 handler，预算到期恒
-                // ExecutionDeadlineError；continue/continue-with 会把预算
-                // 违规洗成成功值（p1c 负控面），execute_on 同。
-                Err(e) if matches!(e, FlowError::FlowTimeout { .. }) => return Err(e),
-                // 节点自有超时按 abort 传播时仍走流级 timeoutHandler
-                // （Go 移植面；#14 只裁「预算到期」这一面）
-                Err(e) if e.is_flow_budget_timeout() => {
-                    // The node's own timeout propagated: the flow-level
-                    // timeout policy decides (continue → nil result,
-                    // continue-with → default, abort/none → the error
-                    // propagates).
-                    match self.timeout_handler.strategy {
-                        Some(HandleStrategy::Continue) => return Ok(Value::Null),
-                        Some(HandleStrategy::ContinueWith) => {
-                            return Ok(self
-                                .timeout_handler
-                                .default_value
-                                .clone()
-                                .unwrap_or(Value::Null))
-                        }
-                        _ => {
-                            return Err(e.wrap_handler(
-                                self.timeout_handler.code,
-                                &self.timeout_handler.message,
-                            ))
-                        }
-                    }
-                }
-                Err(e) if e.is_retryable() && attempt < self.error_handler.retry_times => {
-                    if sleep_respecting(flow_deadline, FLOW_RETRY_DELAY).is_err() {
-                        return Err(FlowError::FlowTimeout {
-                            message: "context deadline exceeded".to_string(),
-                        });
-                    }
-                    attempt += 1;
-                }
-                Err(e) => return Err(e),
+        let budget = self
+            .timeout
+            .unwrap_or_else(crate::budget::default_execution_deadline);
+        let flow_deadline = match Instant::now().checked_add(budget) {
+            Some(dl) => Some(dl),
+            None => {
+                return Err(FlowError::Other(format!(
+                    "flow timeout {} exceeds the platform instant range: the budget is \
+                     representable but no runtime deadline can be formed from it",
+                    crate::duration::to_iso(budget)
+                )))
             }
+        };
+        let rc = RuntimeCtx::new_execution(
+            None,
+            input.clone(),
+            Some(&self.id),
+            self.context
+                .global
+                .as_ref()
+                .and_then(|g| g.as_object().cloned()),
+            self.expose_env.as_ref(),
+            host.execution_id.as_deref(),
+            flow_deadline,
+        );
+        host.emit(Event::FlowStart {
+            flow_id: self.id.clone(),
+        });
+        let result: Result<Value, FlowError> = match flow_deadline {
+            Some(dl) if Instant::now() >= dl => Err(FlowError::FlowTimeout {
+                message: "context deadline exceeded".to_string(),
+            }),
+            _ => self.run_nodes(&rc, host, flow_deadline),
+        };
+        let (result_value, error_text) = match &result {
+            Ok(v) => (Some(v.clone()), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        host.emit(Event::FlowEnd {
+            flow_id: self.id.clone(),
+            result: result_value,
+            error: error_text,
+        });
+        // 流级预算到期 = 终态（#14）：timeoutHandler 不拦截。
+        // Python 权威侧无流级 handler，预算到期恒 ExecutionDeadlineError；
+        // continue/continue-with 会把预算违规洗成成功值（p1c 负控面），
+        // execute_on 同。
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) if matches!(e, FlowError::FlowTimeout { .. }) => Err(e),
+            // 节点自有超时按 abort 传播时仍走流级 timeoutHandler（Go 移植
+            // 面；#14 只裁「预算到期」这一面）
+            Err(e) if e.is_flow_budget_timeout() => {
+                // The node's own timeout propagated: the flow-level timeout
+                // policy decides (continue → nil result, continue-with →
+                // default, abort/none → the error propagates).
+                match self.timeout_handler.strategy {
+                    Some(HandleStrategy::Continue) => Ok(Value::Null),
+                    Some(HandleStrategy::ContinueWith) => Ok(self
+                        .timeout_handler
+                        .default_value
+                        .clone()
+                        .unwrap_or(Value::Null)),
+                    _ => {
+                        Err(e
+                            .wrap_handler(self.timeout_handler.code, &self.timeout_handler.message))
+                    }
+                }
+            }
+            // 其余错误一律终态直抛（无流级重试——单次执行契约，见上）
+            Err(e) => Err(e),
         }
     }
 
     /// Sub-flow entry: executes with an already-prepared context (child /
-    /// loop body / parallel branch), keeping the flow-level retry loop.
+    /// loop body / parallel branch). Single run, like [`Flow::execute`] —
+    /// no flow-level retryTimes re-dispatch (the Go-ism is not implemented;
+    /// a branch failure surfaces to its node once).
     pub fn execute_on(
         &self,
         rc: &SharedCtx,
@@ -217,59 +212,42 @@ impl Flow {
         _input: &Value,
     ) -> Result<Value, FlowError> {
         let flow_deadline = rc.flow_deadline;
-        let mut attempt: u64 = 0;
-        loop {
-            host.emit(Event::FlowStart {
-                flow_id: self.id.clone(),
-            });
-            let result: Result<Value, FlowError> = match flow_deadline {
-                Some(dl) if Instant::now() >= dl => Err(FlowError::FlowTimeout {
-                    message: "context deadline exceeded".to_string(),
-                }),
-                _ => self.run_nodes(rc, host, flow_deadline),
-            };
-            let (result_value, error_text) = match &result {
-                Ok(v) => (Some(v.clone()), None),
-                Err(e) => (None, Some(e.to_string())),
-            };
-            host.emit(Event::FlowEnd {
-                flow_id: self.id.clone(),
-                result: result_value,
-                error: error_text,
-            });
-            match result {
-                Ok(v) => return Ok(v),
-                // 流级预算到期 = 终态（#14），同 execute：timeoutHandler
-                // 不拦截预算违规。
-                Err(e) if matches!(e, FlowError::FlowTimeout { .. }) => return Err(e),
-                // 节点自有超时按 abort 传播时仍走流级 timeoutHandler（Go
-                // 移植面；#14 只裁「预算到期」这一面）
-                Err(e) if e.is_flow_budget_timeout() => match self.timeout_handler.strategy {
-                    Some(HandleStrategy::Continue) => return Ok(Value::Null),
-                    Some(HandleStrategy::ContinueWith) => {
-                        return Ok(self
-                            .timeout_handler
-                            .default_value
-                            .clone()
-                            .unwrap_or(Value::Null))
-                    }
-                    _ => {
-                        return Err(e.wrap_handler(
-                            self.timeout_handler.code,
-                            &self.timeout_handler.message,
-                        ))
-                    }
-                },
-                Err(e) if e.is_retryable() && attempt < self.error_handler.retry_times => {
-                    if sleep_respecting(flow_deadline, FLOW_RETRY_DELAY).is_err() {
-                        return Err(FlowError::FlowTimeout {
-                            message: "context deadline exceeded".to_string(),
-                        });
-                    }
-                    attempt += 1;
-                }
-                Err(e) => return Err(e),
-            }
+        host.emit(Event::FlowStart {
+            flow_id: self.id.clone(),
+        });
+        let result: Result<Value, FlowError> = match flow_deadline {
+            Some(dl) if Instant::now() >= dl => Err(FlowError::FlowTimeout {
+                message: "context deadline exceeded".to_string(),
+            }),
+            _ => self.run_nodes(rc, host, flow_deadline),
+        };
+        let (result_value, error_text) = match &result {
+            Ok(v) => (Some(v.clone()), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        host.emit(Event::FlowEnd {
+            flow_id: self.id.clone(),
+            result: result_value,
+            error: error_text,
+        });
+        match result {
+            Ok(v) => Ok(v),
+            // 流级预算到期 = 终态（#14），同 execute：timeoutHandler
+            // 不拦截预算违规。
+            Err(e) if matches!(e, FlowError::FlowTimeout { .. }) => Err(e),
+            // 节点自有超时按 abort 传播时仍走流级 timeoutHandler（Go
+            // 移植面；#14 只裁「预算到期」这一面）
+            Err(e) if e.is_flow_budget_timeout() => match self.timeout_handler.strategy {
+                Some(HandleStrategy::Continue) => Ok(Value::Null),
+                Some(HandleStrategy::ContinueWith) => Ok(self
+                    .timeout_handler
+                    .default_value
+                    .clone()
+                    .unwrap_or(Value::Null)),
+                _ => Err(e.wrap_handler(self.timeout_handler.code, &self.timeout_handler.message)),
+            },
+            // 其余错误一律终态直抛（无流级重试——单次执行契约，见 execute）
+            Err(e) => Err(e),
         }
     }
 

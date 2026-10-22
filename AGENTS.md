@@ -57,6 +57,13 @@ tools/
    Go 版因错误码 10000 落入「可重试」（retryTimes=0 时无差别）。
 6. 表达式嵌套字符串**不二次求值**、无 `switch:eagerMode` 全局、无 harness/调试 generator ——
    与 Go 版一致的简化面。
+7. **Python 权威三对齐（B4 r7，规格以 plaita Python 引擎为准）**：
+   ①无 timeout 的 flow 补执行级缺省预算 1800s（`PLAITA_EXECUTION_DEADLINE_SECONDS`
+   可调、非法值回默认并告警；Python `deadline.py`/`strategies.py:144`；Go 依赖 worker 层
+   deadline，本引擎自带）；②**无流级 errorHandler**——顶层该键=未知键 warning+忽略，
+   流恒单次执行，Go 的整流重投 ×(1+n) 不实现（Python Flow 模型无该字段）；③parallel
+   分支并发上限=Python 后台池口径（默认 8、同名 env 可调、嵌套池内降级串行内联；
+   Go 分支 goroutine 无上限）。
 
 ## 审计记录（2026-10-21，四路子智能体对抗审计）
 
@@ -73,7 +80,7 @@ tools/
 - P2 群：`_`/dunder 属性闸覆盖非映射基底、`$NULL/$EMPTYSTRING` 后继路径、`\`+换行拒绝、`%g` 负指数、零转换符多余实参报错、sidecar 真进程组杀（process_group(0)+kill -9 -PID）；
 - ir 审计 6 单：end resultType 类型漏拒 / `$F` 扫描 lookbehind+`\s` / globalContext 显式 context 胜出 / http addressing·delegate fail-closed / unknownFields 落 metadata / retryTimes 严格化 + Property 双拼写残留清理 + trpc/mdb 族 hint + version 长度检查。
 
-**文档化残余（有意/存档，不算 bug）**：无全图环保护——switch 自环合法装载，防死循环=必配 flow timeout（与 Go 同型）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试每轮重建上下文（Go 复用上一轮 $NODE/$ERROR 残留——本引擎更干净，有意）。
+**文档化残余（有意/存档，不算 bug）**：无全图环保护——switch 自环合法装载，防死循环=配 flow timeout，缺省另有 1800s 执行预算兜底（B4 r7，不再无限自旋）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试已整体撤出（B4 r7 对齐 Python 单次执行——先前「每轮重建上下文」的分歧面随之消失）。
 
 ## 运行期字符串契约：配置求值、运行期数据（2026-10-21，jeffkit 终裁）
 

@@ -488,9 +488,100 @@ fn execute_child(
 
 // -- parallel ----------------------------------------------------------------
 
+/// Python `parallel_executor.py` 后台池的 worker 数旋钮：
+/// `_DEFAULT_BG_THREAD_WORKERS = int(os.environ.get("PLAITA_BG_THREAD_WORKERS", "8"))`
+/// ——thread/process 两池共用、模块级单例，因此**所有** parallel 节点的并发
+/// 分支流共享同一预算（16 分支默认峰值 8，超出者排队）。Rust 侧以进程级
+/// 信号量等价实现（见 `branch_permits`），同名 env 同默认 8；非法值回退
+/// 默认并告警（Python 是 import 期 int() 直接崩——这里按「降级必须可观测」
+/// 处理，健壮性分歧记录在案）。进程生命周期内取值一次（Python 池同形）。
+fn branch_pool_size() -> usize {
+    const DEFAULT: usize = 8;
+    match std::env::var("PLAITA_BG_THREAD_WORKERS") {
+        Err(_) => DEFAULT,
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(n) if n >= 1 => n,
+            _ => {
+                eprintln!(
+                    "[parallel] PLAITA_BG_THREAD_WORKERS={raw:?} is not a positive integer; \
+                     falling back to the default branch pool of {DEFAULT}"
+                );
+                DEFAULT
+            }
+        },
+    }
+}
+
+/// 进程级分支许可池——plaita 模块级单例后台池的等价物：join 与后台分支、
+/// 嵌套与不嵌套的 parallel 全都从这里取并发名额。
+struct BranchPermits {
+    max: usize,
+    live: std::sync::Mutex<usize>,
+    cv: std::sync::Condvar,
+}
+
+fn branch_permits() -> &'static BranchPermits {
+    static POOL: std::sync::OnceLock<BranchPermits> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| BranchPermits {
+        max: branch_pool_size(),
+        live: std::sync::Mutex::new(0),
+        cv: std::sync::Condvar::new(),
+    })
+}
+
+impl BranchPermits {
+    fn acquire(&self) {
+        let mut live = self.live.lock().expect("branch permit lock");
+        while *live >= self.max {
+            live = self.cv.wait(live).expect("branch permit condvar");
+        }
+        *live += 1;
+    }
+
+    fn release(&self) {
+        let mut live = self.live.lock().expect("branch permit lock");
+        *live -= 1;
+        self.cv.notify_one();
+    }
+}
+
+/// RAII 名额：分支流 panic 也不漏还。
+struct BranchPermit(&'static BranchPermits);
+
+impl BranchPermit {
+    fn acquire() -> BranchPermit {
+        let pool = branch_permits();
+        pool.acquire();
+        BranchPermit(pool)
+    }
+}
+
+impl Drop for BranchPermit {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+thread_local! {
+    /// 当前线程是否正在（持名额）执行一条 parallel 分支流——Python
+    /// `parallel_executor._pool_tls.in_pool` 的移植面。
+    static IN_BRANCH_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn in_branch_pool() -> bool {
+    IN_BRANCH_POOL.with(|c| c.get())
+}
+
 /// plaita concurrent.py 语义：只有显式列进 joinBranches 的分支阻塞等待；
 /// joinBranches 为空 = 全部后台 fire-and-forget，节点立即返回空结果 {}
 /// （与"空列表=全部 join"的旧语义正好相反，issue #7）。
+///
+/// 并发上限（B4 r7 对齐 Python 后台池）：join 与后台分支共享进程级
+/// [`branch_permits`] 名额，默认 8、`PLAITA_BG_THREAD_WORKERS` 可调；
+/// 超出名额的分支在各自线程上排队等号。分支线程持名额期间
+/// [`IN_BRANCH_POOL`] 置位——嵌套 parallel 在分支内降级为**串行内联**
+/// （concurrent.py:233-237 `_execute_nested_inline` 的移植面）：持号线程
+/// 不再取子号、不再开分支线程，杜绝「持号等子号」循环等待。
 fn execute_parallel(
     node: &Node,
     branches: &[crate::model::ParallelBranchDef],
@@ -521,18 +612,75 @@ fn execute_parallel(
         .into_iter()
         .partition(|b| join_branches.contains(&b.branch.name));
 
+    // 分支线程持名额运行分支流；名额 RAII 保证 panic 不漏还。
+    fn run_under_permit(
+        b: &crate::model::ParallelBranchDef,
+        base_rc: &SharedCtx,
+        host: &Host,
+        deadline: Option<Instant>,
+    ) -> Result<Value, NodeError> {
+        let _permit = BranchPermit::acquire();
+        IN_BRANCH_POOL.with(|c| c.set(true));
+        let out = run_branch_flow(b, base_rc, host, deadline);
+        IN_BRANCH_POOL.with(|c| c.set(false));
+        out
+    }
+
+    // 嵌套内联守卫：本线程已在池内（本身是一条分支流），嵌套并行改为
+    // 串行内联执行——正确性优先，仅嵌套场景放弃并发（Python 同款降级，
+    // 消防 concurrent.py 注释里的「分支数 >= max_workers 全员互等」死锁）。
+    if in_branch_pool() {
+        let mut results = serde_json::Map::new();
+        for b in &background {
+            let base_rc = rc.snapshot_arc();
+            if let Err(err) = run_branch_flow(b, &base_rc, host, deadline) {
+                eprintln!(
+                    "parallel node {node_id:?} background branch {name:?} failed (inline): {err}",
+                    node_id = node.id,
+                    name = b.branch.name
+                );
+            }
+        }
+        for b in &join {
+            let base_rc = rc.snapshot_arc();
+            match run_branch_flow(b, &base_rc, host, deadline) {
+                Ok(v) => {
+                    results.insert(b.branch.name.clone(), v);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "parallel node {:?} join branch {:?} failed (inline), result set to the error sentinel: {err}",
+                        node.id, b.branch.name
+                    );
+                    results.insert(
+                        b.branch.name.clone(),
+                        json!({
+                            "__parallel_error__": err.to_string(),
+                            "__branch__": b.branch.name,
+                        }),
+                    );
+                }
+            }
+        }
+        return Ok(StepOutcome {
+            result: Value::Object(results),
+            next: node.next.clone(),
+        });
+    }
+
     // Background branches run fire-and-forget on detached threads; failures
     // are logged, never silently dropped (plaita done_callback alignment).
     // The base context is cloned (snapshot-pinned) in the parent thread
     // BEFORE dispatch (plaita#72), so background branches see parent state
-    // as of the parallel node.
+    // as of the parallel node. Permits draw from the same process-wide pool
+    // as join branches (plaita's single shared background pool).
     for b in &background {
         let base_rc = rc.snapshot_arc();
         let b = (*b).clone();
         let host_thread = host.clone();
         let node_id = node.id.clone();
         let handle = std::thread::spawn(move || {
-            if let Err(err) = run_branch_flow(&b, &base_rc, &host_thread, deadline) {
+            if let Err(err) = run_under_permit(&b, &base_rc, &host_thread, deadline) {
                 eprintln!(
                     "parallel node {node_id:?} background branch {:?} failed: {err}",
                     b.branch.name
@@ -544,9 +692,9 @@ fn execute_parallel(
         host.track_background(handle);
     }
 
-    // Join branches run concurrently; a branch failure does not fail the
-    // node — its slot gets the error sentinel (concurrent.py
-    // _process_future_result).
+    // Join branches run concurrently up to the shared permit budget; a
+    // branch failure does not fail the node — its slot gets the error
+    // sentinel (concurrent.py _process_future_result).
     let mut results = serde_json::Map::new();
     if !join.is_empty() {
         let outcomes: Vec<Result<Value, String>> = std::thread::scope(|scope| {
@@ -556,7 +704,7 @@ fn execute_parallel(
                     let b = (*b).clone();
                     let base_rc = rc.snapshot_arc();
                     let host = host.clone();
-                    scope.spawn(move || run_branch_flow(&b, &base_rc, &host, deadline))
+                    scope.spawn(move || run_under_permit(&b, &base_rc, &host, deadline))
                 })
                 .collect();
             handles

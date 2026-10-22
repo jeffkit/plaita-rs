@@ -222,8 +222,10 @@ pub struct Flow {
     pub input_type: Option<Property>,
     #[serde(default, rename = "outputType")]
     pub output_type: Option<Property>,
-    #[serde(default, rename = "errorHandler")]
-    pub error_handler: ErrorPolicy,
+    // 流级 errorHandler/timeoutHandler：errorHandler 不是本引擎契约面
+    // （plaita Flow 模型无该字段，装载期 warn+metadata 留痕后忽略，
+    // 见 ir::validate::stash_unknown_flow_fields）；timeoutHandler 保留
+    // 是 r6 #14 的裁决面（节点自有超时 abort 传播时咨询，Go 移植面）。
     #[serde(default, rename = "timeoutHandler")]
     pub timeout_handler: TimeoutPolicy,
     #[serde(default)]
