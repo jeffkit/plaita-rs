@@ -4,8 +4,9 @@
 - reference side: tools/go-ref (imports plaita-go's pkg/ir directly)
 - candidate side: the plaita-rs CLI
 
-A case passes when both engines agree: same result (JSON-equal, with
-numbers compared numerically so int 6 == float 6.0) or both failing.
+A case passes when both engines agree: same result (JSON-equal — integers
+compared exactly even beyond 2^53, int 6 == float 6.0, floats within a
+1e-12 relative tolerance) or both failing. `--selftest` pins the predicate.
 Error agreement compares only the failure CLASS prefix (both error) — the
 message texts are engine dialects and are reported on mismatch.
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -83,15 +85,65 @@ def run_rs(cli: Path, flow: Path, inp: dict | None) -> tuple[str | None, str]:
 
 
 def numbers_equal(a, b) -> bool:
+    """Structural equality with domain-appropriate numeric leaves (issue #12).
+
+    int/int and mixed int/float compare exactly via Python `==` — never
+    coerce to f64 first, or every pair of integers beyond 2^53 collapses
+    onto the same float and real drift reads as agreement. Only two floats
+    get tolerance: math.isclose(rel_tol=1e-12, abs_tol=0.0). NaN matches
+    NaN and inf matches only itself — the old `abs(a-b) < 1e-9` flipped
+    inf==inf into a false mismatch (inf-inf=nan).
+    """
     if isinstance(a, bool) or isinstance(b, bool):
         return a is b
-    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-        return abs(float(a) - float(b)) < 1e-9
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(numbers_equal(a[k], b[k]) for k in a)
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(numbers_equal(x, y) for x, y in zip(a, b))
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        if isinstance(a, float) and isinstance(b, float):
+            if math.isnan(a) and math.isnan(b):
+                return True
+            return math.isclose(a, b, rel_tol=1e-12, abs_tol=0.0)
+        return a == b
     return a == b
+
+
+SELFTEST_CASES: list[tuple[object, object, bool, str]] = [
+    (2**63 - 1, 2**63 - 2, False, "adjacent i64 max must differ"),
+    (9007199254740993, 9007199254740992, False, "2^53+1 vs 2^53 must differ"),
+    (10**19, 10**19 + 1, False, "huge adjacent ints must differ"),
+    (6, 6.0, True, "int 6 == float 6.0"),
+    (9007199254740993, 9007199254740992.0, False, "mixed int/float stays exact"),
+    (0.1 + 0.2, 0.3, True, "float tolerance (rel 1e-12)"),
+    (1.0, 1.0 + 1e-15, True, "float tolerance at 1.0 scale"),
+    (1.0, 1.0 + 1e-9, False, "1e-9 apart at 1.0 scale must differ"),
+    (float("inf"), float("inf"), True, "inf equals itself"),
+    (float("-inf"), float("-inf"), True, "-inf equals itself"),
+    (float("inf"), float("-inf"), False, "+inf != -inf"),
+    (float("nan"), float("nan"), True, "NaN == NaN (engines agree)"),
+    (float("nan"), 1.0, False, "NaN != number"),
+    (True, 1, False, "bool never equals int"),
+    ({"a": 6}, {"a": 6.0}, True, "recursion keeps numeric leaves"),
+    ({"a": 2**53 + 1}, {"a": 2**53 + 2}, False, "recursion keeps int exactness"),
+    ([1, [2**53 + 1]], [1, [2**53 + 2]], False, "nested lists keep int exactness"),
+]
+
+
+def selftest() -> int:
+    bad = 0
+    for a, b, want, label in SELFTEST_CASES:
+        got = numbers_equal(a, b)
+        mark = "ok" if got == want else "SELFTEST-FAIL"
+        if got != want:
+            bad += 1
+        print(f"{mark:>13} numbers_equal({a!r}, {b!r}) = {got}  # {label}")
+    print()
+    if bad:
+        print(f"FAILED: {bad}/{len(SELFTEST_CASES)} selftest assertions")
+        return 1
+    print(f"OK: all {len(SELFTEST_CASES)} equality assertions hold")
+    return 0
 
 
 def ensure_cli_current(cli: Path) -> None:
@@ -174,4 +226,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     sys.exit(main())
