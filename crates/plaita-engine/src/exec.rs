@@ -2,6 +2,7 @@
 //! event callbacks (port of plaita-go `pkg/workflow/workflow.go` + retry.go
 //! + timeout.go + event.go).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,13 +41,22 @@ pub enum Event {
 pub type EventSink = Arc<dyn Fn(&Event) + Send + Sync>;
 
 /// Host-side wiring for one execution tree: the distributed execution id,
-/// the event listeners and the fire-and-forget branch join handles. Shared
-/// (by `Arc`) across flow/branch threads.
+/// the event listeners, the fire-and-forget branch join handles and the
+/// cancellation signals. Shared (by `Arc`) across flow/branch threads —
+/// clones see the same flags, so cancelling any handle in the execution
+/// tree propagates to the whole chain (Python ExecutionContext 父子共享
+/// 同一对 Event 的对应面).
 #[derive(Clone, Default)]
 pub struct Host {
     pub execution_id: Option<String>,
     events: Arc<Vec<EventSink>>,
     background: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
+    /// 节点级协作取消信号（Python `cancel_event`）：作用域=当前节点，进入
+    /// 新节点前复位；code 沙箱等待循环观察到置位当场杀进程组。
+    cancel_event: Arc<AtomicBool>,
+    /// 执行级取消意图（Python `cancel_requested`）：粘滞、永不复位，
+    /// 节点边界消费。
+    cancel_requested: Arc<AtomicBool>,
 }
 
 impl Host {
@@ -57,9 +67,36 @@ impl Host {
     pub fn with_execution_id(execution_id: impl Into<String>) -> Host {
         Host {
             execution_id: Some(execution_id.into()),
-            events: Arc::new(Vec::new()),
-            background: Default::default(),
+            ..Host::default()
         }
+    }
+
+    /// Requests cancellation of this execution (idempotent — Python
+    /// `FlowExecution.cancel()` 同形). Sets both signals:
+    /// - `cancel_event`: the node-scoped cooperative signal — the code
+    ///   sandbox wait loop observes it and kills the process tree on sight;
+    /// - `cancel_requested`: the sticky execution-level intent — the engine
+    ///   refuses to continue at node boundaries (named cancel error,
+    ///   bypassing every retry/error policy). Default semantics: stop at the
+    ///   step boundary; in-flight non-sandbox nodes run to completion.
+    pub fn cancel(&self) {
+        self.cancel_event.store(true, Ordering::SeqCst);
+        self.cancel_requested.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_cancel_requested(&self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    /// The node-scoped cooperative flag (consumed by the code sandbox wait
+    /// loop); cleared on every node entry so a leftover signal never kills
+    /// the next node's sidecar (Python runner.py:592-600).
+    pub(crate) fn cancel_event_flag(&self) -> &AtomicBool {
+        &self.cancel_event
+    }
+
+    pub(crate) fn clear_cancel_event(&self) {
+        self.cancel_event.store(false, Ordering::SeqCst);
     }
 
     /// Registers an event listener (builder style).
@@ -177,6 +214,11 @@ impl Flow {
         match result {
             Ok(v) => Ok(v),
             Err(e) if matches!(e, FlowError::FlowTimeout { .. }) => Err(e),
+            // 执行级取消 = 终态（plaita#267 波次③）：节点 errorHandler/
+            // timeoutHandler 与流级 timeoutHandler 均不拦截——取消是执行级
+            // 意图，不是节点错误（Python FlowCancelledException 不经任何
+            // handler 分发）。
+            Err(e) if matches!(e, FlowError::Cancelled { .. }) => Err(e),
             // 节点自有超时按 abort 传播时仍走流级 timeoutHandler（Go 移植
             // 面；#14 只裁「预算到期」这一面）
             Err(e) if e.is_flow_budget_timeout() => {
@@ -235,6 +277,9 @@ impl Flow {
             // 流级预算到期 = 终态（#14），同 execute：timeoutHandler
             // 不拦截预算违规。
             Err(e) if matches!(e, FlowError::FlowTimeout { .. }) => Err(e),
+            // 执行级取消 = 终态，同 execute：不经任何 handler 分发
+            //（plaita#267 波次③）。
+            Err(e) if matches!(e, FlowError::Cancelled { .. }) => Err(e),
             // 节点自有超时按 abort 传播时仍走流级 timeoutHandler（Go
             // 移植面；#14 只裁「预算到期」这一面）
             Err(e) if e.is_flow_budget_timeout() => match self.timeout_handler.strategy {
@@ -264,6 +309,13 @@ impl Flow {
             return Err(FlowError::Other("start node not found".to_string()));
         };
         loop {
+            // 节点边界取消门（plaita#267 波次③；Python runner.py:602-613
+            // 同形）：粘滞的 cancel_requested 在本节点入口直接拒绝执行，
+            // 先于重试与 errorHandler——取消不被任何节点策略吞掉。默认
+            // 语义=步界取消：在途非沙箱节点跑完，下一节点具名拒绝。
+            if host.is_cancel_requested() {
+                return Err(cancelled_at(node, "before running"));
+            }
             let outcome = self.execute_node(node, rc, host, flow_deadline)?;
             if node.node_type == "end" {
                 return Ok(outcome.result);
@@ -297,6 +349,11 @@ impl Flow {
         // 的 nd < fd 恒判成节点预算、节点 timeoutHandler 被咨询。单点
         // 取时流预算更紧则 nd 与 fd 精确相等，归属退化为静态预算比较
         // （plaita runner.py:631-634：更紧的配置预算决定归属）。
+        // cancel_event 的作用域是当前节点（Python runner.py:592-600 同形）：
+        // 上一个节点遗留的取消信号在进入本节点前复位——否则后续每个 code
+        // 节点的沙箱都会被误杀。
+        host.clear_cancel_event();
+
         let node_deadline: Option<Instant> = {
             let now = Instant::now();
             match (flow_deadline, node.timeout) {
@@ -311,6 +368,12 @@ impl Flow {
         let mut outcome: Option<StepOutcome> = None;
         let mut final_err: Option<NodeError> = None;
         loop {
+            // 每次尝试入口的取消门（Python runner.py:684-686 同形：挡住
+            // 「取消恰好发生在退避结束与下一次尝试之间」的窗口；首轮在
+            // run_nodes 边界门已拦，此处仅在重试轮可达）。
+            if host.is_cancel_requested() {
+                return Err(cancelled_at(node, "while running"));
+            }
             rc.reset_current();
             host.emit(Event::NodeStart {
                 flow_id: self.id.clone(),
@@ -339,6 +402,13 @@ impl Flow {
                 Ok(o) => {
                     outcome = Some(o);
                     break;
+                }
+                // 取消优先于任何节点错误/重试分类（Python #267：节点在取消
+                // 后抛出的异常不得被包装成节点错误或再重试一轮）——置于
+                // Timeout/可重试分类之前，errorHandler 的 continue 策略
+                // 永远接不到取消。
+                Err(_ne) if host.is_cancel_requested() => {
+                    return Err(cancelled_at(node, "while running"));
                 }
                 Err(ne) if ne.class == ErrorClass::Timeout => {
                     if flow_budget_binding(rc, node_deadline) {
@@ -386,11 +456,19 @@ impl Flow {
                     let delay = NODE_BACKOFF_BASE
                         .saturating_mul(2u32.saturating_pow((attempt as u32).min(31)))
                         .min(NODE_BACKOFF_CAP);
-                    if sleep_respecting(node_deadline, delay).is_err() {
-                        final_err = Some(NodeError::timeout("context deadline exceeded"));
-                        break;
+                    // 退避可被取消打断（Python _backoff_sleep_cancellable：
+                    // 0.5s 分片轮询 cancel_requested，cancel 在 ≤1s 内打断
+                    // 重试/退避）；deadline 语义与 sleep_respecting 一致。
+                    match sleep_backoff_cancellable(host, node_deadline, delay) {
+                        Backoff::Slept => attempt += 1,
+                        Backoff::Expired => {
+                            final_err = Some(NodeError::timeout("context deadline exceeded"));
+                            break;
+                        }
+                        Backoff::Cancelled => {
+                            return Err(cancelled_at(node, "while running"));
+                        }
                     }
-                    attempt += 1;
                 }
             }
         }
@@ -483,18 +561,61 @@ fn flow_budget_binding(rc: &SharedCtx, node_deadline: Option<Instant>) -> bool {
     true
 }
 
-/// Sleeps for `d`, returning Err if the deadline would be exceeded.
-pub(crate) fn sleep_respecting(deadline: Option<Instant>, d: Duration) -> Result<(), ()> {
-    if let Some(dl) = deadline {
-        let now = Instant::now();
-        if now >= dl {
-            return Err(());
-        }
-        let d = d.min(dl.saturating_duration_since(now));
-        std::thread::sleep(d);
-        Ok(())
+/// 取消的具名错误（Python `_cancelled_error` 同形：标签取
+/// `node.name or node.id`；「before running」=节点入口拒绝，「while
+/// running」=重试尝试/退避中打断）。
+fn cancelled_at(node: &Node, phase: &str) -> FlowError {
+    let label = if node.name.is_empty() {
+        &node.id
     } else {
-        std::thread::sleep(d);
-        Ok(())
+        &node.name
+    };
+    FlowError::Cancelled {
+        message: format!("Execution cancelled {phase} node {label}"),
     }
+}
+
+/// 取消轮询粒度（Python `_CANCEL_POLL_INTERVAL_SECONDS`=0.5s）：重试退避
+/// 期间每片最多等这么久就复查一次 cancel_requested——cancel 在 ≤1s 内打断
+/// 退避（plaita#267 验收口径）。
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 退避睡眠的三种结局。
+enum Backoff {
+    /// 睡满（或被 deadline 截短——撞线由下一轮 body 入口判过期，与
+    /// sleep_respecting 的原语义一致）
+    Slept,
+    /// 入口即已过 deadline
+    Expired,
+    /// 退避期间 cancel_requested 置位
+    Cancelled,
+}
+
+/// 可被取消打断的退避（Python `_backoff_sleep_cancellable` 对应面）：按
+/// [`CANCEL_POLL_INTERVAL`] 分片睡眠，每片后复查 cancel_requested；deadline
+/// 只截短睡眠、不在此处报错（预算到期归 body 入口的既有判定）。
+fn sleep_backoff_cancellable(host: &Host, deadline: Option<Instant>, d: Duration) -> Backoff {
+    if deadline.is_some_and(|dl| Instant::now() >= dl) {
+        return Backoff::Expired;
+    }
+    if host.is_cancel_requested() {
+        return Backoff::Cancelled;
+    }
+    let mut remaining = d;
+    while remaining > Duration::ZERO {
+        let mut shard = remaining.min(CANCEL_POLL_INTERVAL);
+        if let Some(dl) = deadline {
+            let left = dl.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Backoff::Slept;
+            }
+            shard = shard.min(left);
+        }
+        std::thread::sleep(shard);
+        remaining -= shard;
+        if host.is_cancel_requested() {
+            return Backoff::Cancelled;
+        }
+    }
+    Backoff::Slept
 }

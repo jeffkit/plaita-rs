@@ -23,6 +23,12 @@ pub const NODE_EXEC_ERROR_CODE: i64 = 1003;
 /// plaita ErrorHandler.error_code's default abort code.
 pub const DEFAULT_HANDLER_ERROR_CODE: i64 = -9527;
 
+/// Execution-level cancellation (plaita#267 波次③; Python
+/// `FlowCancelledException`). Distinct from the generic -500 / node -520 /
+/// timeout -1 families so the upper layer can recognize a cancelled
+/// terminal state.
+pub const CANCELLED_ERROR_CODE: i64 = -4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
     /// bad configuration/parameters — a retry cannot fix it
@@ -106,6 +112,13 @@ pub enum FlowError {
     /// mirroring plaita's ExecutionDeadlineError): node timeout/error
     /// policies and the flow-level timeoutHandler never soften it.
     FlowTimeout { message: String },
+    /// Execution-level cancellation (plaita#267 波次③; Python
+    /// `FlowCancelledException`, code=-4). The sticky `cancel_requested`
+    /// intent is honored at node boundaries — BEFORE any retry/errorHandler
+    /// classification, so no continue policy can swallow it — and never
+    /// flows through handler chains: cancellation is an execution-level
+    /// intent, not a node error. Terminal, like FlowTimeout.
+    Cancelled { message: String },
     /// Engine-level failures (reentry, missing node, ...).
     Other(String),
 }
@@ -178,6 +191,11 @@ impl fmt::Display for FlowError {
                 write!(f, "code: {code}, message: {message}, cause: {cause}")
             }
             FlowError::FlowTimeout { message } => write!(f, "{message}"),
+            // Python FlowCancelledException 同族方言：code=-4 是取消专属
+            // 错误码，上层按它识别取消终态
+            FlowError::Cancelled { message } => {
+                write!(f, "code: {CANCELLED_ERROR_CODE}, message: {message}")
+            }
             FlowError::Other(m) => write!(f, "{m}"),
         }
     }
