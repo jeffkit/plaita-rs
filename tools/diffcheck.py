@@ -7,8 +7,10 @@
 A case passes when both engines agree: same result (JSON-equal — integers
 compared exactly even beyond 2^53, int 6 == float 6.0, floats within a
 1e-12 relative tolerance) or both failing. `--selftest` pins the predicate.
-Error agreement compares only the failure CLASS prefix (both error) — the
-message texts are engine dialects and are reported on mismatch.
+Error agreement compares only the failure CLASS — both engines refusing the
+definition IS agreement; message texts are engine dialects (go may fail in
+typed unmarshal where rust fails in a type gate) and are reported, never
+compared (A1 r132 card R-3).
 
 Usage: python3 tools/diffcheck.py [--go-ref PATH] [--cli PATH]
 
@@ -50,6 +52,28 @@ MANIFEST: list[tuple[str, Path, dict | None]] = [
     ("error/continue-policy", CASES / "error_continue.json", {"v": "42"}),
     # 契约用例（2026-10-21）：运行期字符串是数据——两侧都必须原样返回
     ("runtime/string-is-data", CASES / "runtime_data.json", None),
+    # 装载面扩例（A1 r132 卡 R-3，2026-10-23；探针源 /tmp/a1r130/flows，
+    # plaita-go 侧同源钉入=卡 G-3）：go/rs 对 Python 宽松形状的一致前置。
+    # 等值门只比失败类——branches-str 两引擎文案全不同（go typed-unmarshal /
+    # rs 类型闸）但同属装载拒，即一致。
+    ("load/neg-infinity", CASES / "load_neg_infinity.json", None),
+    ("load/depth-10000", CASES / "load_depth_10000.json", None),
+    ("load/depth-100", CASES / "load_depth_100.json", None),
+    ("load/branches-str", CASES / "load_branches_str.json", None),
+    ("load/next-int", CASES / "load_next_int.json", None),
+]
+
+# Known-red 负控（A1 r132 卡 G-1×R-3 联动）：引擎当下的 recorded 分歧，
+# 每条钉死「期望分歧形状」；形状保持期间门绿。G-1 修口合并 plaita-go main、
+# go-ref 重建后形状翻转为双侧同拒——届时本门会红并给出翻绿指引：把该案
+# 升入 MANIFEST（both-error 类级绿）并从本表删除。
+#
+# 深度 150（go 过/rs 128 拒）按卡**永不进门**：永久刻意分歧，只入
+# AGENTS.md + cargo test 钉 128（卡 R-4），不进等值门也不进本表。
+KNOWN_RED: list[tuple[str, Path, dict | None, str, str]] = [
+    # (name, flow_path, input, 期望 go 结局, 期望 rs 结局) — "ok"/"error"
+    ("load/lone-surrogate-high", CASES / "load_lone_surrogate_high.json", None, "ok", "error"),
+    ("load/lone-surrogate-low", CASES / "load_lone_surrogate_low.json", None, "ok", "error"),
 ]
 
 
@@ -188,16 +212,15 @@ def main() -> int:
         go_out, go_err = run_go(go_ref, flow, inp)
         rs_out, rs_err = run_rs(cli, flow, inp)
         if go_out is None and rs_out is None:
-            # the error CLASS must agree: the Rust message must contain the
-            # Go core message (Go wraps with "execute: ", Rust with its own
-            # node prefix — the plaita message text itself is shared)
+            # 等值门只比失败类（卡 R-3）：双侧都拒该定义即一致——go 可能
+            # 败在 typed unmarshal、rs 败在类型闸，文案是引擎方言，只展示
+            # 不计分。子串命中时仍标注「same core message」留观察面。
             go_core = go_err.split("execute: ", 1)[-1]
             go_core = go_core.split("load: ", 1)[-1]
             if go_core in rs_err:
                 verdict = "both-error (same core message)"
             else:
-                failures += 1
-                verdict = "MISMATCH (error text diverged)"
+                verdict = "both-error (dialect texts differ)"
             detail = f"go: {go_err[:80]!r} | rust: {rs_err[:80]!r}"
         elif go_out is None or rs_out is None:
             failures += 1
@@ -217,11 +240,36 @@ def main() -> int:
         if verdict != "OK":
             print(f"{'':34} → {detail}")
 
+    for name, flow, inp, go_want, rs_want in KNOWN_RED:
+        go_out, go_err = run_go(go_ref, flow, inp)
+        rs_out, rs_err = run_rs(cli, flow, inp)
+        go_got = "ok" if go_out is not None else "error"
+        rs_got = "ok" if rs_out is not None else "error"
+        shape = f"{go_got}/{rs_got}"
+        if (go_got, rs_got) == (go_want, rs_want):
+            print(f"{name:34} {'ok' if go_out is not None else 'ERR':>10} "
+                  f"{'ok' if rs_out is not None else 'ERR':>10} "
+                  f"known-red holds ({shape}; 待 G-1 翻绿)")
+            continue
+        failures += 1
+        print(f"{name:34} {'ok' if go_out is not None else 'ERR':>10} "
+              f"{'ok' if rs_out is not None else 'ERR':>10} "
+              f"KNOWN-RED SHAPE CHANGED ({shape}, was {go_want}/{rs_want})")
+        if go_got == "error" and rs_got == "error":
+            print(f"{'':34} → G-1 已合且 go-ref 已重建:双侧同拒已成一致——"
+                  f"把本案升入 MANIFEST 并从 KNOWN_RED 删除(翻绿进门)")
+        else:
+            print(f"{'':34} → 形状漂移非 G-1 方向:先归因(rs 开始收=回归,查拒载面;"
+                  f"go 开始拒=另有修口,核对 plaita-go 日志)再动本表")
+
     print()
     if failures:
-        print(f"FAILED: {failures} mismatch(es) out of {len(MANIFEST)} cases")
+        print(f"FAILED: {failures} mismatch(es) out of "
+              f"{len(MANIFEST)} manifest + {len(KNOWN_RED)} known-red cases")
         return 1
-    print(f"OK: {len(MANIFEST)}/{len(MANIFEST)} cases agree between plaita-go and plaita-rs")
+    print(f"OK: {len(MANIFEST)}/{len(MANIFEST)} manifest cases agree; "
+          f"{len(KNOWN_RED)}/{len(KNOWN_RED)} known-red negatives hold"
+          + (" (待 G-1 修口合并后翻绿)" if KNOWN_RED else ""))
     return 0
 
 

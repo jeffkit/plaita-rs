@@ -1,0 +1,1 @@
+{"flow_id": "probe", "nodes": [{"id": "s", "type": "start", "next": "e", "output": {"a": -Infinity}}, {"id": "e", "type": "end"}]}
