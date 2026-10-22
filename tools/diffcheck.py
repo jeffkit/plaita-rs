@@ -10,6 +10,10 @@ Error agreement compares only the failure CLASS prefix (both error) — the
 message texts are engine dialects and are reported on mismatch.
 
 Usage: python3 tools/diffcheck.py [--go-ref PATH] [--cli PATH]
+
+The candidate CLI must exist and be no older than the crate sources
+(`make diffcheck` builds it first); a stale or missing binary is refused
+fail-closed instead of being silently used as the comparison side.
 """
 
 from __future__ import annotations
@@ -90,12 +94,41 @@ def numbers_equal(a, b) -> bool:
     return a == b
 
 
+def ensure_cli_current(cli: Path) -> None:
+    """Refuse to run against a missing or stale CLI binary (issue #11).
+
+    The reference side is rebuilt from the plaita-go worktree on every run;
+    if the candidate side stayed stale, the gate would report agreement for
+    code that never participated. Fail closed with the build command — no
+    fallback to the old binary. Only `crates/*/src/**` counts: changes to
+    tests/benches don't invalidate the bin, and cargo build would not
+    refresh it, leaving the gate stuck.
+    """
+    if not cli.is_file():
+        sys.exit(
+            f"error: CLI under test not found: {cli}\n"
+            "build it first: cargo build -p plaita-cli (or just: make diffcheck)"
+        )
+    newest_src = max(
+        (p.stat().st_mtime for p in (ROOT / "crates").glob("*/src/**/*.rs")),
+        default=0.0,
+    )
+    if cli.stat().st_mtime < newest_src:
+        sys.exit(
+            "error: CLI binary is older than crate sources — refusing to "
+            "diffcheck a stale binary\n"
+            f"  binary: {cli}\n"
+            "  rebuild: cargo build -p plaita-cli (or just: make diffcheck)"
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--go-ref", default=str(ROOT / "tools" / "go-ref-bin"))
     ap.add_argument("--cli", default=str(ROOT / "target" / "debug" / "plaita-rs"))
     args = ap.parse_args()
     go_ref, cli = Path(args.go_ref), Path(args.cli)
+    ensure_cli_current(cli)
 
     failures = 0
     print(f"{'case':34} {'go':>10} {'rust':>10} verdict")
