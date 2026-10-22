@@ -759,3 +759,47 @@ fn code_timeout_kills_whole_process_group() {
         }
     );
 }
+
+/// 流级 errorHandler 不是本引擎的契约面（B4 r7 对齐 Python，A4 台账裁决）：
+/// plaita 的 Flow 模型没有流级 errorHandler/retryTimes（core/flow.py 无该
+/// 字段），顶层该键是未知键——warning+忽略（node/basic.py
+/// warn_unknown_keys），流恒单次执行，错误直抛终态。Go 的整流重投 ×(1+n)
+/// 是刻意不实现的 Go-ism：副作用节点全量重放 + child 的 transient 错误烧
+/// 流级预算。装载期把该键点名告警并落 metadata.unknownFields——把沉默变
+/// 可见（对齐 Python 同名机制的 stderr+metadata 双通道）。
+#[test]
+fn flow_level_error_handler_is_ignored_and_single_run() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let flow_starts = Arc::new(AtomicUsize::new(0));
+    let counter = flow_starts.clone();
+    let host = Host::new().listen(Arc::new(move |e: &plaita_engine::Event| {
+        if let plaita_engine::Event::FlowStart { .. } = e {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    // $NOPE 缺根 KeyError → 引擎错误码 10000 → 瞬态（可重试类），节点
+    // abort 策略直抛流级——旧实现会以 retryTimes=2 整流重跑 ×3。
+    let data = r#"{
+        "flow_id": "flow-retry-ignored",
+        "errorHandler": {"strategy": "abort", "retryTimes": 2},
+        "nodes": [
+            {"type": "start", "id": "s", "next": "a"},
+            {"type": "assignment", "id": "a", "next": "e", "output": "$F.add($NOPE, 1)"},
+            {"type": "end", "id": "e", "resultType": "success", "output": "$NODE.a"}
+        ]}"#;
+    let flow = ir::load(data.as_bytes()).unwrap();
+    // 装载必须成功（Python 可载，只是警告+忽略），且落 metadata.unknownFields
+    assert!(
+        flow.metadata.is_object() && flow.metadata["unknownFields"] == json!("errorHandler"),
+        "flow-level errorHandler must be stashed into metadata.unknownFields, got {:?}",
+        flow.metadata
+    );
+    let got = flow.execute(&json!({}), &host);
+    assert!(got.is_err(), "the transient error propagates as terminal");
+    assert_eq!(
+        flow_starts.load(Ordering::SeqCst),
+        1,
+        "exactly ONE whole-flow run: no flow-level retryTimes re-dispatch"
+    );
+}

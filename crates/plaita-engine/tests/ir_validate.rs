@@ -620,20 +620,25 @@ fn budget_node_retry_times_cap() {
     );
 }
 
+/// B4 r7 改写留痕：流级 errorHandler 随整流重投一并撤出契约面（Python
+/// Flow 模型无该字段、顶层键=未知键 warning+忽略）——不再有流级 retryTimes
+/// cap；装载成功 + 点名告警 + metadata.unknownFields 留痕，任意值（含旧
+/// cap 外的 11/1e9）都进不了执行语义。节点级 cap 不变
+/// （budget_node_retry_times_cap）。
 #[test]
-fn budget_flow_retry_times_cap() {
-    let f = |rt: Value| {
-        budget_flow(
+fn budget_flow_retry_times_cap_removed_with_flow_level_handler() {
+    for rt in [json!(10), json!(11), json!(1000000000)] {
+        let flow = load(budget_flow(
             json!({"strategy": "continue", "retryTimes": rt}),
             json!(null),
-        )
-    };
-    assert!(load(f(json!(10))).is_ok());
-    let err = err_of(f(json!(11)));
-    assert!(
-        err.contains(r#"ir: flow "caps1": flow: errorHandler.retryTimes 11 exceeds the cap 10"#),
-        "{err}"
-    );
+        ))
+        .unwrap_or_else(|e| panic!("flow-level errorHandler must load (ignored), rt={rt}: {e}"));
+        assert_eq!(
+            flow.metadata["unknownFields"],
+            json!("errorHandler"),
+            "the ignored key is named on the loaded artifact, rt={rt}"
+        );
+    }
 }
 
 #[test]

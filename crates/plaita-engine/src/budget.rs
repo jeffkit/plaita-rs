@@ -17,10 +17,11 @@
 
 use std::time::Duration;
 
-/// Caps `errorHandler.retryTimes` at every level (flow and node) —
-/// retryTimes multiplies flow re-runs / node attempts, so an unbounded value
-/// lets a legal flow occupy a worker for days (retryTimes=1e9 at the 10ms
-/// flow-retry cadence ≈ 115 days of continuous occupancy).
+/// Caps `errorHandler.retryTimes` at the NODE level (B4 r7 narrowed: the
+/// flow-level cap is gone with the flow-level handler itself — plaita has no
+/// flow-level errorHandler and the whole-flow re-run is not implemented, so
+/// the retryTimes budget hazard exists only where retryTimes actually
+/// multiplies node attempts).
 pub const MAX_RETRY_TIMES: u64 = 10;
 
 /// Caps a single node's timeout budget (plaita#267 MAX_NODE_TIMEOUT_MS) —

@@ -278,6 +278,7 @@ pub fn normalize_doc(doc: &mut Value, scope: Scope) -> Result<(), String> {
 
     validate::validate_doc(doc, scope).map_err(|e| e.to_string())?;
     validate::stash_unknown_node_fields(doc);
+    validate::stash_unknown_flow_fields(doc);
     Ok(())
 }
 
