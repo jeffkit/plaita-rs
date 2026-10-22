@@ -69,7 +69,7 @@ jobs:
           repository: jeffkit/plaita-nodes
           path: plaita-nodes
           persist-credentials: false
-      - uses: actions/setup-python@e797f83bcb11b83ae66ecda4b2144e76a6a6e28a # v6.0.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       # Entry points come from INSTALLED distributions (dist-info), sys.path
