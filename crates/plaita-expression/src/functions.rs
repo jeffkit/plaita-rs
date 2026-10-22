@@ -146,19 +146,40 @@ fn fn_sub(args: &[Value]) -> Result<Value, EvalError> {
     Err(py_operator_type_err("sub", "-", a, b))
 }
 
-/// Python str/list 重复：负数与 0 → 空序列；超过 1 亿是 ValueError
-/// （Python #68 守卫的硬上限口径；Go 版在这里静默截断到 1 亿——给错值比报错
-/// 更糟，故改为具名错误）。
-fn repeat_count(n: i64) -> Result<usize, EvalError> {
+/// 结果规模预算（Python `_EXPR_*` 同口径）：allowed =
+/// min(max(input_size × GROWTH_FACTOR, 软下限 100_000), 硬上限 1 亿)。
+const EXPR_MAX_RESULT_SIZE: usize = 100_000;
+const EXPR_GROWTH_FACTOR: usize = 4;
+const EXPR_MAX_RESULT_HARD: usize = 100_000_000;
+
+fn allowed_result_size(input_size: usize) -> usize {
+    input_size
+        .saturating_mul(EXPR_GROWTH_FACTOR)
+        .clamp(EXPR_MAX_RESULT_SIZE, EXPR_MAX_RESULT_HARD)
+}
+
+/// Python str/list 重复的**分配之前**规模闸（`_size_refusal` 同款文案）：
+/// projected = seq_len × n 超过 allowed 即 ValueError，绝不先分配再死。
+/// 先前的闸卡在「重复次数 ≤1e8」上，结果规模（|seq|×n）从未被检查——
+/// 100 元素数组 ×1e8 是次数闸放行的合法值，却要求 ~760GB。
+/// 口径注释：seq_len 用 Rust 字节长度（`str::len`），Python 计字符——
+/// 字节 ≥ 字符，只会更严不放宽；多字节串的 limit 数字与 Python 不同、
+/// 判定只会更早拒绝（plaita-go 用 rune 计数闸、字节分配，是另一种不一致，
+/// 不照抄）。空序列投影为 0，任何倍数都合法（Python 同：`'' * 1e9 == ''`）。
+fn repeat_len(fn_name: &str, seq_len: usize, n: i64, unit: &str) -> Result<usize, EvalError> {
     if n <= 0 {
         return Ok(0);
     }
-    if n > 100_000_000 {
+    let count = usize::try_from(n).unwrap_or(usize::MAX);
+    let projected = seq_len.saturating_mul(count);
+    let allowed = allowed_result_size(seq_len);
+    if projected > allowed {
         return Err(EvalError::value_error(format!(
-            "result too large: {n} repetitions (limit 100000000)"
+            "$F.{fn_name}({seq_len} * {n}) result too large: {projected} {unit} \
+             (limit {allowed}). Refusing to build an unbounded result."
         )));
     }
-    Ok(n as usize)
+    Ok(count)
 }
 
 /// `a * b`: numbers multiply; str/list repeat by an int (new sequence).
@@ -175,18 +196,20 @@ fn fn_mul(args: &[Value]) -> Result<Value, EvalError> {
     }
     if let Value::String(s) = a {
         if let Some(bi) = py_int(b) {
-            return Ok(Value::String(s.repeat(repeat_count(bi)?)));
+            let count = repeat_len("mul", s.len(), bi, "chars")?;
+            return Ok(Value::String(s.repeat(count)));
         }
     }
     if let Value::String(s) = b {
         if let Some(ai) = py_int(a) {
-            return Ok(Value::String(s.repeat(repeat_count(ai)?)));
+            let count = repeat_len("mul", s.len(), ai, "chars")?;
+            return Ok(Value::String(s.repeat(count)));
         }
     }
     if let Value::Array(al) = a {
         if let Some(bi) = py_int(b) {
-            let count = repeat_count(bi)?;
-            let mut out = Vec::with_capacity(al.len() * count);
+            let count = repeat_len("mul", al.len(), bi, "elements")?;
+            let mut out = Vec::with_capacity(al.len().saturating_mul(count));
             for _ in 0..count {
                 out.extend(al.iter().cloned());
             }
@@ -195,8 +218,8 @@ fn fn_mul(args: &[Value]) -> Result<Value, EvalError> {
     }
     if let Value::Array(bl) = b {
         if let Some(ai) = py_int(a) {
-            let count = repeat_count(ai)?;
-            let mut out = Vec::with_capacity(bl.len() * count);
+            let count = repeat_len("mul", bl.len(), ai, "elements")?;
+            let mut out = Vec::with_capacity(bl.len().saturating_mul(count));
             for _ in 0..count {
                 out.extend(bl.iter().cloned());
             }
@@ -1621,5 +1644,121 @@ mod tests {
         assert_eq!(call("$F.lower($INPUT.missing)", json!({})), json!(""));
         assert_eq!(call("$F.keys($INPUT.missing)", json!({})), json!([]));
         assert!(eval_str("$F.len($INPUT.missing)", &roots(json!({}))).is_err());
+    }
+
+    // -- #5：$F.mul 结果规模闸（Python _size_refusal 同款，分配之前具名拒绝）--
+
+    fn mul_oversize_input() -> Value {
+        json!({"s": "a".repeat(100), "a": (0..100).collect::<Vec<i64>>()})
+    }
+
+    #[test]
+    fn mul_refuses_projected_oversize() {
+        // 次数闸（≤1e8）放行 100 元素 ×1e8 = 1e10 元素 ≈760GB——规模闸必须拦：
+        // str 与 list、正序与逆序、字面量与运行期数据同一道闸
+        for expr in [
+            "$F.mul('ab', 100000000)",
+            "$F.mul(100000000, 'ab')",
+            "$F.mul($INPUT.s, 200000)",
+            "$F.mul(200000, $INPUT.s)",
+            "$F.mul($INPUT.a, 100000)",
+            "$F.mul(100000, $INPUT.a)",
+        ] {
+            let err = eval_str(expr, &roots(mul_oversize_input()))
+                .err()
+                .unwrap_or_else(|| panic!("{expr}: expected refusal, got Ok"));
+            let msg = err.to_string();
+            assert!(msg.starts_with("ValueError: "), "{expr}: {msg}");
+            assert!(msg.contains("result too large"), "{expr}: {msg}");
+            assert!(
+                msg.contains("Refusing to build an unbounded result."),
+                "{expr}: {msg}"
+            );
+        }
+        // 文案与 Python 逐字同款：seq_len * n、投影数、limit、单位
+        let msg = eval_str("$F.mul('ab', 100000000)", &roots(json!({})))
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            msg,
+            "ValueError: $F.mul(2 * 100000000) result too large: 200000000 chars \
+             (limit 100000). Refusing to build an unbounded result."
+        );
+        let msg = eval_str("$F.mul($INPUT.a, 100000)", &roots(mul_oversize_input()))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            msg.contains("$F.mul(100 * 100000) result too large: 10000000 elements (limit 100000)"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn mul_scale_gate_matches_python_budget() {
+        // 闸不能过紧：4× 放大系数必须放行（Python 实测口径，pre-fix 已绿的
+        // 防错断言——漏了 GROWTH_FACTOR 会把这几条误杀）
+        assert_eq!(
+            call("$F.mul($INPUT.s, 3)", json!({"s": "a".repeat(50000)}))
+                .as_str()
+                .unwrap()
+                .len(),
+            150000
+        );
+        assert_eq!(
+            call("$F.mul($INPUT.s, 2)", json!({"s": "a".repeat(1000000)}))
+                .as_str()
+                .unwrap()
+                .len(),
+            2000000
+        );
+        // 边界：投影 == limit 放行（Python 比较是严格大于）
+        assert_eq!(
+            call("$F.mul($INPUT.s, 4)", json!({"s": "a".repeat(25000)}))
+                .as_str()
+                .unwrap()
+                .len(),
+            100000
+        );
+        // 越界一档：limit 跟着输入规模走（4×50000=200000）
+        let msg = eval_str(
+            "$F.mul($INPUT.s, 5)",
+            &roots(json!({"s": "a".repeat(50000)})),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(
+            msg.contains("$F.mul(50000 * 5) result too large: 250000 chars (limit 200000)"),
+            "{msg}"
+        );
+        // 空序列 × 巨数：Python 是合法的空结果（projected 0），次数闸口径误杀过它
+        assert_eq!(call("$F.mul('', 200000000)", json!({})), json!(""));
+        assert_eq!(
+            call("$F.mul($INPUT.e, 200000000)", json!({"e": []})),
+            json!([])
+        );
+    }
+
+    #[test]
+    fn mul_semantics_unchanged_under_scale_gate() {
+        // 语义不回归：短串/数组/负零倍数/整数溢出/浮点全原样
+        let e = json!({});
+        assert_eq!(call("$F.mul('ab', 3)", e.clone()), json!("ababab"));
+        assert_eq!(call("$F.mul('ab', -1)", e.clone()), json!(""));
+        assert_eq!(call("$F.mul('ab', 0)", e.clone()), json!(""));
+        // 文法没有列表字面量——数组两侧方向都走 $INPUT
+        assert_eq!(
+            call("$F.mul($INPUT.l, 2)", json!({"l": [1]})),
+            json!([1, 1])
+        );
+        assert_eq!(
+            call("$F.mul(2, $INPUT.l)", json!({"l": ["x"]})),
+            json!(["x", "x"])
+        );
+        assert_eq!(call("$F.mul(3, 4)", e.clone()), json!(12));
+        assert_eq!(call("$F.mul(3, 4.5)", e.clone()), json!(13.5));
+        assert!(eval_str("$F.mul(9223372036854775807, 2)", &roots(e)).is_err());
     }
 }
