@@ -575,3 +575,152 @@ fn end_error_code_null_renders_nil() {
         other => panic!("expected end node, got {other:?}"),
     }
 }
+
+// -- 装载预算 cap（#8：plaita#267/#35 对齐，Go/Python 均拒载，本仓先前放行）--
+
+fn budget_flow(handler: Value, node: Value) -> Value {
+    // null = 不携带该键（errorHandler: null 本就被装载拒绝，fixture 别混入）
+    let mut d = json!({
+        "flowId": "caps1",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "a"},
+            {"type": "assignment", "id": "a", "next": "e"},
+            {"type": "end", "id": "e"}
+        ]
+    });
+    if !handler.is_null() {
+        d["errorHandler"] = handler;
+    }
+    if !node.is_null() {
+        d["nodes"][1]["timeout"] = node;
+    }
+    d
+}
+
+#[test]
+fn budget_node_retry_times_cap() {
+    let f = |rt: Value| {
+        let mut d = budget_flow(json!(null), json!(null));
+        d["nodes"][1]["errorHandler"] = json!({"strategy": "continue", "retryTimes": rt});
+        d
+    };
+    assert!(load(f(json!(10))).is_ok(), "cap boundary is inclusive");
+    let err = err_of(f(json!(11)));
+    assert!(
+        err.contains(r#"node "a": errorHandler.retryTimes 11 exceeds the cap 10"#),
+        "{err}"
+    );
+    // 1e9 的审计形状（retryTimes multiplies node attempts）
+    let err = err_of(f(json!(1000000000)));
+    assert!(
+        err.contains("errorHandler.retryTimes 1000000000 exceeds the cap 10"),
+        "{err}"
+    );
+}
+
+#[test]
+fn budget_flow_retry_times_cap() {
+    let f = |rt: Value| {
+        budget_flow(
+            json!({"strategy": "continue", "retryTimes": rt}),
+            json!(null),
+        )
+    };
+    assert!(load(f(json!(10))).is_ok());
+    let err = err_of(f(json!(11)));
+    assert!(
+        err.contains(r#"ir: flow "caps1": flow: errorHandler.retryTimes 11 exceeds the cap 10"#),
+        "{err}"
+    );
+}
+
+#[test]
+fn budget_node_timeout_cap() {
+    let f = |t: Value| budget_flow(json!(null), t);
+    assert!(
+        load(f(json!("PT86400S"))).is_ok(),
+        "24h boundary is inclusive"
+    );
+    assert!(
+        load(f(json!("PT0S"))).is_ok(),
+        "explicit zero stays a set budget"
+    );
+    let err = err_of(f(json!("PT90000S")));
+    assert!(
+        err.contains(r#"node "a": timeout PT90000S exceeds the 24h cap"#),
+        "{err}"
+    );
+    // 毫秒拼写走同一拒绝面（90000000 ms 归一化后即 25h）
+    let err = err_of(f(json!(90000000u64)));
+    assert!(err.contains("PT90000S exceeds the 24h cap"), "{err}");
+}
+
+#[test]
+fn budget_flow_timeout_deliberately_uncapped() {
+    // flow 级 timeout 不设上限是 Go/Python/本仓三家的共同决策（运营预算；
+    // 运行期由 worker deadline 取严——worker 层不在本仓）
+    assert!(load(budget_flow(json!(null), json!(null))).is_ok());
+    let f = |t: &str| {
+        json!({
+            "flowId": "caps1",
+            "timeout": t,
+            "nodes": [
+                {"type": "start", "id": "s", "next": "e"},
+                {"type": "end", "id": "e"}
+            ]
+        })
+    };
+    assert!(load(f("PT90000S")).is_ok());
+    assert!(load(f("PT1000000S")).is_ok());
+}
+
+#[test]
+fn budget_caps_cover_embedded_flows() {
+    // normalize_embedded 递归进 childFlow —— 嵌入流内节点同受 cap
+    let doc = json!({
+        "nodes": [
+            {"type": "start", "id": "s", "next": "c"},
+            {"type": "child", "id": "c", "next": "e", "childFlow": {
+                "nodes": [
+                    {"type": "start", "id": "s", "next": "a"},
+                    {"type": "assignment", "id": "a", "next": "e",
+                     "errorHandler": {"strategy": "continue", "retryTimes": 11}},
+                    {"type": "end", "id": "e"}
+                ]
+            }},
+            {"type": "end", "id": "e"}
+        ]
+    });
+    let err = err_of(doc);
+    assert!(err.contains("retryTimes 11 exceeds the cap 10"), "{err}");
+}
+
+#[test]
+fn timeout_beyond_instant_range_rejected_at_load() {
+    // r1 移交：Duration 可表示但超平台 Instant 值域（本机 Instant 是
+    // timespec——tv_sec: i64 秒，值域窗口在 i64::MAX 秒 9.22e18 与
+    // Duration::MAX 1.845e19 之间；ns-u64 平台窗口更窄）→ 裸加是进程级
+    // panic，fail-closed 收在装载期。测试值 9.9e18 s 落在两个平台的
+    // 溢出区间内。
+    // 节点级：超 24h cap 先拦（巨值同为具名拒载，fail-closed 同效；
+    // 24h 远小于任何平台的 Instant 值域，cap 内构不成此场景）
+    let err = err_of(budget_flow(json!(null), json!("PT1844674407370955161S")));
+    assert!(err.contains("exceeds the 24h cap"), "{err}");
+    // flow 级不设 cap——超 Instant 值域预算由 normalize 的具名闸拒载；
+    // ISO 与毫秒两个拼写同一出口
+    let f = |t: Value| {
+        json!({
+            "flowId": "caps1",
+            "timeout": t,
+            "nodes": [
+                {"type": "start", "id": "s", "next": "e"},
+                {"type": "end", "id": "e"}
+            ]
+        })
+    };
+    let err = err_of(f(json!("PT9900000000000000000S")));
+    assert!(err.contains("exceeds the platform instant range"), "{err}");
+    // 毫秒拼写：1e22 ms = 1e19 s，同样落溢出区间
+    let err = err_of(f(json!(1e22)));
+    assert!(err.contains("exceeds the platform instant range"), "{err}");
+}

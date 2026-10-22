@@ -136,7 +136,12 @@ fn fn_sub(args: &[Value]) -> Result<Value, EvalError> {
     arity("sub", args, 2)?;
     let (a, b) = (&args[0], &args[1]);
     if let (Some(ai), Some(bi)) = (py_int(a), py_int(b)) {
-        return int_add_overflow(ai, -bi)
+        // checked_sub 不产生中间负数：先前的 `-bi` 在 bi == i64::MIN 处自身
+        // 溢出（release 回绕 → sub(0, MIN) 静默返回负值 / debug panic）。
+        // 真值在域内的 sub(MIN, MIN)=0 直接放行（Python: 0），域外的
+        // sub(0, MIN)=2^63 落 add/mul/pow 同款 OverflowError。
+        return ai
+            .checked_sub(bi)
             .map(Value::from)
             .ok_or_else(|| EvalError::overflow("$F.sub: integer subtraction result too large"));
     }
@@ -146,19 +151,40 @@ fn fn_sub(args: &[Value]) -> Result<Value, EvalError> {
     Err(py_operator_type_err("sub", "-", a, b))
 }
 
-/// Python str/list 重复：负数与 0 → 空序列；超过 1 亿是 ValueError
-/// （Python #68 守卫的硬上限口径；Go 版在这里静默截断到 1 亿——给错值比报错
-/// 更糟，故改为具名错误）。
-fn repeat_count(n: i64) -> Result<usize, EvalError> {
+/// 结果规模预算（Python `_EXPR_*` 同口径）：allowed =
+/// min(max(input_size × GROWTH_FACTOR, 软下限 100_000), 硬上限 1 亿)。
+const EXPR_MAX_RESULT_SIZE: usize = 100_000;
+const EXPR_GROWTH_FACTOR: usize = 4;
+const EXPR_MAX_RESULT_HARD: usize = 100_000_000;
+
+fn allowed_result_size(input_size: usize) -> usize {
+    input_size
+        .saturating_mul(EXPR_GROWTH_FACTOR)
+        .clamp(EXPR_MAX_RESULT_SIZE, EXPR_MAX_RESULT_HARD)
+}
+
+/// Python str/list 重复的**分配之前**规模闸（`_size_refusal` 同款文案）：
+/// projected = seq_len × n 超过 allowed 即 ValueError，绝不先分配再死。
+/// 先前的闸卡在「重复次数 ≤1e8」上，结果规模（|seq|×n）从未被检查——
+/// 100 元素数组 ×1e8 是次数闸放行的合法值，却要求 ~760GB。
+/// 口径注释：seq_len 用 Rust 字节长度（`str::len`），Python 计字符——
+/// 字节 ≥ 字符，只会更严不放宽；多字节串的 limit 数字与 Python 不同、
+/// 判定只会更早拒绝（plaita-go 用 rune 计数闸、字节分配，是另一种不一致，
+/// 不照抄）。空序列投影为 0，任何倍数都合法（Python 同：`'' * 1e9 == ''`）。
+fn repeat_len(fn_name: &str, seq_len: usize, n: i64, unit: &str) -> Result<usize, EvalError> {
     if n <= 0 {
         return Ok(0);
     }
-    if n > 100_000_000 {
+    let count = usize::try_from(n).unwrap_or(usize::MAX);
+    let projected = seq_len.saturating_mul(count);
+    let allowed = allowed_result_size(seq_len);
+    if projected > allowed {
         return Err(EvalError::value_error(format!(
-            "result too large: {n} repetitions (limit 100000000)"
+            "$F.{fn_name}({seq_len} * {n}) result too large: {projected} {unit} \
+             (limit {allowed}). Refusing to build an unbounded result."
         )));
     }
-    Ok(n as usize)
+    Ok(count)
 }
 
 /// `a * b`: numbers multiply; str/list repeat by an int (new sequence).
@@ -175,18 +201,20 @@ fn fn_mul(args: &[Value]) -> Result<Value, EvalError> {
     }
     if let Value::String(s) = a {
         if let Some(bi) = py_int(b) {
-            return Ok(Value::String(s.repeat(repeat_count(bi)?)));
+            let count = repeat_len("mul", s.len(), bi, "chars")?;
+            return Ok(Value::String(s.repeat(count)));
         }
     }
     if let Value::String(s) = b {
         if let Some(ai) = py_int(a) {
-            return Ok(Value::String(s.repeat(repeat_count(ai)?)));
+            let count = repeat_len("mul", s.len(), ai, "chars")?;
+            return Ok(Value::String(s.repeat(count)));
         }
     }
     if let Value::Array(al) = a {
         if let Some(bi) = py_int(b) {
-            let count = repeat_count(bi)?;
-            let mut out = Vec::with_capacity(al.len() * count);
+            let count = repeat_len("mul", al.len(), bi, "elements")?;
+            let mut out = Vec::with_capacity(al.len().saturating_mul(count));
             for _ in 0..count {
                 out.extend(al.iter().cloned());
             }
@@ -195,8 +223,8 @@ fn fn_mul(args: &[Value]) -> Result<Value, EvalError> {
     }
     if let Value::Array(bl) = b {
         if let Some(ai) = py_int(a) {
-            let count = repeat_count(ai)?;
-            let mut out = Vec::with_capacity(bl.len() * count);
+            let count = repeat_len("mul", bl.len(), ai, "elements")?;
+            let mut out = Vec::with_capacity(bl.len().saturating_mul(count));
             for _ in 0..count {
                 out.extend(bl.iter().cloned());
             }
@@ -307,7 +335,15 @@ fn fn_pow(args: &[Value]) -> Result<Value, EvalError> {
 fn fn_abs(args: &[Value]) -> Result<Value, EvalError> {
     arity("abs", args, 1)?;
     if let Some(i) = py_int(&args[0]) {
-        return Ok(Value::from(i.abs()));
+        // abs(i64::MIN) = 2^63 出 i64 域：裸 abs() 是 std 写明的双 profile
+        // 分歧（debug panic / release 回绕回负值）。落 add/mul/pow 同款
+        // OverflowError（AGENTS 文档化残余「>i64 报 OverflowError」出口；
+        // Python 权威给 2**63，plaita-go 静默回负——负值不落任何允许出口，
+        // Go 侧同根问题按跨仓同根拆单提报）。
+        return i
+            .checked_abs()
+            .map(Value::from)
+            .ok_or_else(|| EvalError::overflow("$F.abs: integer absolute value too large"));
     }
     if let Some(f) = py_float(&args[0]) {
         return Ok(Value::from(f.abs()));
@@ -385,8 +421,27 @@ fn fn_round(args: &[Value]) -> Result<Value, EvalError> {
         return py_round_to_int(f).map(Value::from);
     }
     let n = py_index_arg("round", &args[1])?;
+    if !f.is_finite() {
+        // round(inf/nan, n) 原样返回（Python 实测）——必须先于值域判断
+        return float_value(f);
+    }
     if n == 0 {
         return float_value(py_round_digits(f, 0));
+    }
+    // CPython 口径（本地实跑核对）：任何 f64 的十进制展开至多 1074 位
+    // （2^-1074 亚常规尾数），n ≥ 1075 时舍入位置在展开之外 → 恒等
+    // （round(1e-20, 4294967297) == 1e-20）；n ∈ [18, 1074] 仍是真实按位
+    // 舍入（round(1e-20, 18) == 0.0、round(1e-20, 20) == 1e-20）——旧实现
+    // `n as i32` 截断在这里给出 1.2/错值，py_round_digits 的 min(17) 钳位
+    // 则把 [18,1074] 整段错成 0.0 面。负向：|n| ≥ 309 时 10^|n| 已超 f64
+    // 上限（1.8e308），任何有限值都舍到 ±0.0（round(1.5, -2147483648) ==
+    // 0.0 / round(-1.5, -2147483648) == -0.0），旧实现的 powi(-n) 在这里
+    // 溢出 panic。收窄到 [-308, 1074] 后 i32 强转安全。
+    if n > 1074 {
+        return float_value(f);
+    }
+    if n < -308 {
+        return float_value(0.0f64.copysign(f));
     }
     float_value(py_round_digits(f, n as i32))
 }
@@ -413,7 +468,9 @@ fn py_round_digits(f: f64, n: i32) -> f64 {
         let v: f64 = shifted.parse().unwrap_or(f);
         return v * scale;
     }
-    let n = n.min(17);
+    // 调用方（fn_round）已把 n 收窄到 [0, 1074]：任何 f64 的十进制展开
+    // 至多 1074 位，这个宽度内的 format+parse 就是 Python 的按位舍入。
+    // 旧 min(17) 钳位会把 round(1e-20, 20) 错成 0.0（Python: 1e-20）。
     let s = format!("{:.*}", n as usize, f);
     s.parse().unwrap_or(f)
 }
@@ -798,28 +855,36 @@ fn fn_sort(args: &[Value]) -> Result<Value, EvalError> {
         _ => String::new(),
     };
     let desc = matches!(args.get(2), Some(Value::Bool(true)));
-    let mut out = list_arg("sort", args, 0)?;
-    let key = move |v: &Value| sort_key_of(v, &sort_key);
-    // stable insertion sort over the key values (small n in practice)
-    for i in 1..out.len() {
-        let mut j = i;
-        while j > 0 {
-            let (a, b) = (key(&out[j - 1]), key(&out[j]));
-            let ord = crate::value::compare("$F.sort", &a, &b)?;
-            // ascending: swap when prev > cur; descending: swap when prev < cur
-            let out_of_order = match ord {
-                std::cmp::Ordering::Greater => !desc,
-                std::cmp::Ordering::Less => desc,
-                std::cmp::Ordering::Equal => false,
-            };
-            if !out_of_order {
-                break;
-            }
-            out.swap(j - 1, j);
-            j -= 1;
-        }
+    let out = list_arg("sort", args, 0)?;
+    // Schwartzian 变换：每个元素只取一次 key（Python sorted(key=...) 的形状）。
+    // 旧实现是插入排序且每次比较重新取两次键（各 clone 一次）——O(n²) 带分配，
+    // 64k 倒序整数 release 实测 54.9s；Python sorted()/Go SliceStable 都是
+    // O(n log n)，n 来自运行期数据，慢不是可接受的有意行为。
+    let mut keyed: Vec<(Value, Value)> = out
+        .into_iter()
+        .map(|v| {
+            let k = sort_key_of(&v, &sort_key);
+            (k, v)
+        })
+        .collect();
+    // 可比性预检：O(n) 相邻比较。compare 只认 numeric 与 str 两族，原序里
+    // 只要存在跨类元素就必然有一对相邻跨类键——错误类型与文案与现在同源，
+    // 且预检后比较器闭包不可能再失败（sort_by 的比较器不能向上抛错，也不能
+    // 用「错误槽 + 一律 Equal」让全序契约破洞）。
+    for pair in keyed.windows(2) {
+        crate::value::compare("$F.sort", &pair[0].0, &pair[1].0)?;
     }
-    Ok(Value::Array(out))
+    // slice::sort_by 稳定（等价 Timsort/SliceStable），相等键原相对顺序保持；
+    // desc 用 Ordering::reverse 表达。
+    keyed.sort_by(|(ka, _), (kb, _)| {
+        let o = crate::value::compare("$F.sort", ka, kb).unwrap_or(std::cmp::Ordering::Equal);
+        if desc {
+            o.reverse()
+        } else {
+            o
+        }
+    });
+    Ok(Value::Array(keyed.into_iter().map(|(_, v)| v).collect()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1621,5 +1686,240 @@ mod tests {
         assert_eq!(call("$F.lower($INPUT.missing)", json!({})), json!(""));
         assert_eq!(call("$F.keys($INPUT.missing)", json!({})), json!([]));
         assert!(eval_str("$F.len($INPUT.missing)", &roots(json!({}))).is_err());
+    }
+
+    // -- #5：$F.mul 结果规模闸（Python _size_refusal 同款，分配之前具名拒绝）--
+
+    fn mul_oversize_input() -> Value {
+        json!({"s": "a".repeat(100), "a": (0..100).collect::<Vec<i64>>()})
+    }
+
+    #[test]
+    fn mul_refuses_projected_oversize() {
+        // 次数闸（≤1e8）放行 100 元素 ×1e8 = 1e10 元素 ≈760GB——规模闸必须拦：
+        // str 与 list、正序与逆序、字面量与运行期数据同一道闸
+        for expr in [
+            "$F.mul('ab', 100000000)",
+            "$F.mul(100000000, 'ab')",
+            "$F.mul($INPUT.s, 200000)",
+            "$F.mul(200000, $INPUT.s)",
+            "$F.mul($INPUT.a, 100000)",
+            "$F.mul(100000, $INPUT.a)",
+        ] {
+            let err = eval_str(expr, &roots(mul_oversize_input()))
+                .err()
+                .unwrap_or_else(|| panic!("{expr}: expected refusal, got Ok"));
+            let msg = err.to_string();
+            assert!(msg.starts_with("ValueError: "), "{expr}: {msg}");
+            assert!(msg.contains("result too large"), "{expr}: {msg}");
+            assert!(
+                msg.contains("Refusing to build an unbounded result."),
+                "{expr}: {msg}"
+            );
+        }
+        // 文案与 Python 逐字同款：seq_len * n、投影数、limit、单位
+        let msg = eval_str("$F.mul('ab', 100000000)", &roots(json!({})))
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            msg,
+            "ValueError: $F.mul(2 * 100000000) result too large: 200000000 chars \
+             (limit 100000). Refusing to build an unbounded result."
+        );
+        let msg = eval_str("$F.mul($INPUT.a, 100000)", &roots(mul_oversize_input()))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            msg.contains("$F.mul(100 * 100000) result too large: 10000000 elements (limit 100000)"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn mul_scale_gate_matches_python_budget() {
+        // 闸不能过紧：4× 放大系数必须放行（Python 实测口径，pre-fix 已绿的
+        // 防错断言——漏了 GROWTH_FACTOR 会把这几条误杀）
+        assert_eq!(
+            call("$F.mul($INPUT.s, 3)", json!({"s": "a".repeat(50000)}))
+                .as_str()
+                .unwrap()
+                .len(),
+            150000
+        );
+        assert_eq!(
+            call("$F.mul($INPUT.s, 2)", json!({"s": "a".repeat(1000000)}))
+                .as_str()
+                .unwrap()
+                .len(),
+            2000000
+        );
+        // 边界：投影 == limit 放行（Python 比较是严格大于）
+        assert_eq!(
+            call("$F.mul($INPUT.s, 4)", json!({"s": "a".repeat(25000)}))
+                .as_str()
+                .unwrap()
+                .len(),
+            100000
+        );
+        // 越界一档：limit 跟着输入规模走（4×50000=200000）
+        let msg = eval_str(
+            "$F.mul($INPUT.s, 5)",
+            &roots(json!({"s": "a".repeat(50000)})),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(
+            msg.contains("$F.mul(50000 * 5) result too large: 250000 chars (limit 200000)"),
+            "{msg}"
+        );
+        // 空序列 × 巨数：Python 是合法的空结果（projected 0），次数闸口径误杀过它
+        assert_eq!(call("$F.mul('', 200000000)", json!({})), json!(""));
+        assert_eq!(
+            call("$F.mul($INPUT.e, 200000000)", json!({"e": []})),
+            json!([])
+        );
+    }
+
+    #[test]
+    fn mul_semantics_unchanged_under_scale_gate() {
+        // 语义不回归：短串/数组/负零倍数/整数溢出/浮点全原样
+        let e = json!({});
+        assert_eq!(call("$F.mul('ab', 3)", e.clone()), json!("ababab"));
+        assert_eq!(call("$F.mul('ab', -1)", e.clone()), json!(""));
+        assert_eq!(call("$F.mul('ab', 0)", e.clone()), json!(""));
+        // 文法没有列表字面量——数组两侧方向都走 $INPUT
+        assert_eq!(
+            call("$F.mul($INPUT.l, 2)", json!({"l": [1]})),
+            json!([1, 1])
+        );
+        assert_eq!(
+            call("$F.mul(2, $INPUT.l)", json!({"l": ["x"]})),
+            json!(["x", "x"])
+        );
+        assert_eq!(call("$F.mul(3, 4)", e.clone()), json!(12));
+        assert_eq!(call("$F.mul(3, 4.5)", e.clone()), json!(13.5));
+        assert!(eval_str("$F.mul(9223372036854775807, 2)", &roots(e)).is_err());
+    }
+
+    // -- #7：i64::MIN 取负族（sub/abs）与 round 的 ndigits 值域 --------------
+
+    fn overflow_of(expr: &str, input: Value) -> String {
+        let msg = eval_str(expr, &roots(input))
+            .err()
+            .unwrap_or_else(|| panic!("{expr}: expected OverflowError, got Ok"))
+            .to_string();
+        assert!(msg.starts_with("OverflowError: "), "{expr}: {msg}");
+        msg
+    }
+
+    #[test]
+    fn int_negation_family_is_checked() {
+        // abs(i64::MIN) = 2^63 出 i64 域：与同文件 add/mul/pow 同款 OverflowError
+        //（AGENTS 文档化残余「>i64 报 OverflowError」；Python 给 2**63，plaita-go
+        // 静默回负——负值不落任何允许出口）。字面量与运行期数据两条路径。
+        let min = json!({"a": -9223372036854775808i64});
+        for expr in ["$F.abs(-9223372036854775808)", "$F.abs($INPUT.a)"] {
+            overflow_of(expr, min.clone());
+        }
+        // sub(0, MIN) 真值 2^63 同款；pre-fix 的 -bi 在 MIN 上自身溢出
+        //（release 回绕出静默负值 / debug panic）
+        for expr in ["$F.sub(0, -9223372036854775808)", "$F.sub(0, $INPUT.a)"] {
+            overflow_of(expr, min.clone());
+        }
+        // sub(MIN, MIN) 真值 0 在域内：checked_sub 直接判定（Python: 0，
+        // 不是 OverflowError——不用「先取负再 checked_add」的写法）
+        assert_eq!(call("$F.sub($INPUT.a, $INPUT.a)", min.clone()), json!(0));
+        // 正控：已 checked 的路径不回归
+        overflow_of("$F.sub(-9223372036854775808, 1)", min.clone());
+        overflow_of("$F.add(-9223372036854775808, -1)", min.clone());
+        overflow_of("$F.mul(-9223372036854775808, -1)", min.clone());
+        overflow_of("$F.pow(2, 64)", json!({}));
+        // 常规语义
+        let e = json!({});
+        assert_eq!(call("$F.sub(5, 2)", e.clone()), json!(3));
+        assert_eq!(call("$F.sub(5, 2.5)", e.clone()), json!(2.5));
+        assert_eq!(call("$F.abs(-5)", e.clone()), json!(5));
+        assert_eq!(call("$F.abs(-5.5)", e.clone()), json!(5.5));
+    }
+
+    #[test]
+    fn round_ndigits_domain_is_python_exact() {
+        let e = json!({});
+        // i32 截断钉子（不涉及任何溢出）：4294967297 as i32 == 1 → 旧实现 1.2
+        assert_eq!(
+            call("$F.round(1.2345, 4294967297)", e.clone()),
+            json!(1.2345)
+        );
+        // 2^31 两个方向（pre：debug panic / release OverflowError nan）
+        assert_eq!(call("$F.round(1.5, 2147483648)", e.clone()), json!(1.5));
+        assert_eq!(call("$F.round(1.5, -2147483648)", e.clone()), json!(0.0));
+        // -0.0 符号保留：JSON 数值比较区分不了 ±0，走位型断言
+        let neg0 = call("$F.round(-1.5, -2147483648)", e.clone());
+        assert_eq!(neg0.as_f64().unwrap().to_bits(), (-0.0f64).to_bits());
+        assert_eq!(call("$F.round(1.5, -400)", e.clone()), json!(0.0));
+        // 正向大 n 不是恒等：按位舍入的真实区间语义（1e-20 的有效位在
+        // 第 20 位小数）——旧 min(17) 钳位在这里给出 0.0 错值
+        assert_eq!(call("$F.round(1e-20, 18)", e.clone()), json!(0.0));
+        assert_eq!(call("$F.round(1e-20, 20)", e.clone()), json!(1e-20));
+        assert_eq!(call("$F.round(1e-20, 4294967297)", e.clone()), json!(1e-20));
+        // 正控不回归
+        assert_eq!(call("$F.round(1.5, 0)", e.clone()), json!(2.0));
+        assert_eq!(call("$F.round(1234.5, -3)", e.clone()), json!(1000.0));
+        assert_eq!(call("$F.round(1.5, 20)", e.clone()), json!(1.5));
+        assert_eq!(call("$F.round(2.5)", e.clone()), json!(2));
+        assert_eq!(call("$F.round(1.2345, 2)", e.clone()), json!(1.23));
+        assert_eq!(call("$F.round(3, 1)", e.clone()), json!(3));
+    }
+
+    // -- #6：$F.sort 算法改制的守恒锚与性能分母 ------------------------------
+
+    #[test]
+    fn sort_behavior_conserved() {
+        // 稳定性：相等键保持原相对顺序（Python Timsort / Go SliceStable 同约）
+        let st = json!({"a": [{"k": 1, "i": 0}, {"k": 1, "i": 1}, {"k": 0, "i": 2}]});
+        assert_eq!(
+            call("$F.sort($INPUT.a, 'k')", st.clone()),
+            json!([{"k": 0, "i": 2}, {"k": 1, "i": 0}, {"k": 1, "i": 1}])
+        );
+        assert_eq!(
+            call("$F.sort($INPUT.a, 'k', true)", st),
+            json!([{"k": 1, "i": 0}, {"k": 1, "i": 1}, {"k": 0, "i": 2}])
+        );
+        // 字符串序
+        assert_eq!(
+            call("$F.sort($INPUT.a)", json!({"a": ["b", "a", "c"]})),
+            json!(["a", "b", "c"])
+        );
+        // None 键参与比较仍是 TypeError（缺键回退 None 的既有语义）
+        assert!(eval_str(
+            "$F.sort($INPUT.a, 'k')",
+            &roots(json!({"a": [{"k": Value::Null}, {"k": 1}]}))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sort_large_input_within_budget() {
+        // #6 性能分母（防退化）：64k 倒序整数，旧插入排序 release 实测
+        // 17.56s（debug 分钟级），O(n log n) 在 debug 下也远低于 5s。
+        // 结果守恒断言同测：升序且恰为 0..64000（多重集不变）。
+        let input: Vec<i64> = (0..64_000).rev().collect();
+        let t0 = std::time::Instant::now();
+        let out = eval_str("$F.sort($INPUT)", &roots(json!(input))).unwrap();
+        let dt = t0.elapsed();
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr.len(), 64_000);
+        assert_eq!(arr[0].as_i64().unwrap(), 0);
+        assert_eq!(arr[63_999].as_i64().unwrap(), 63_999);
+        assert!(arr
+            .windows(2)
+            .all(|w| w[0].as_i64().unwrap() <= w[1].as_i64().unwrap()));
+        assert!(
+            dt < std::time::Duration::from_secs(5),
+            "sort 64k took {dt:?}"
+        );
     }
 }

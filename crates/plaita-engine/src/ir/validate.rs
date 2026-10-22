@@ -18,6 +18,8 @@ use serde_json::{Map, Value};
 
 use plaita_expression::function_names;
 
+use crate::budget::{MAX_NODE_TIMEOUT, MAX_NODE_TIMEOUT_TEXT, MAX_RETRY_TIMES};
+use crate::duration;
 use crate::ir::scope::Scope;
 use crate::ir::support::{first_any, get_str, node_label};
 use crate::property::Property;
@@ -27,6 +29,12 @@ pub fn validate_doc(doc: &Value, scope: Scope) -> Result<(), String> {
         return Err("ir: flow document must be an object".to_string());
     };
     let flow_id = get_str(doc_obj, &["id"]).unwrap_or_default();
+    // Budget caps: the flow-level retryTimes shares the node-level cap. The
+    // flow-level timeout is deliberately NOT capped: an explicit flow timeout
+    // is an operator's budget decision（Go validateDoc 入口先查 flow 级）。
+    if let Some(h) = doc_obj.get("errorHandler").and_then(|h| h.as_object()) {
+        check_retry_times_cap(&flow_id, h, "flow")?;
+    }
     let Some(nodes) = doc_obj.get("nodes").and_then(|n| n.as_array()) else {
         return Err(format!("ir: flow {flow_id:?}: nodes missing"));
     };
@@ -164,11 +172,64 @@ pub fn validate_doc(doc: &Value, scope: Scope) -> Result<(), String> {
     // per-node rules (first error wins); they apply to every node incl. end —
     // end.output is the $NODE ref hot spot
     for n in &node_objs {
+        check_budget_caps(&flow_id, n)?;
         check_node_refs(&flow_id, n, &ids)?;
         check_expression_functions(&flow_id, n)?;
         check_output_type_literal(&flow_id, n)?;
     }
     Ok(())
+}
+
+// --- budget caps（plaita#267/#35，与 plaita-go checkBudgetCaps 同名同语义）---
+
+/// 装载期预算 cap：`errorHandler.retryTimes`（flow 级与节点级共用 cap 10）与
+/// 节点 `timeout`（≤24h）——无界重试/超时预算让合法 flow 长期独占共享
+/// worker，Go/Python 都在装载/构造期具名拒绝，本引擎先前是唯一放行的一家。
+/// 时机在 normalize 之后：timeout 已是规范 ISO 8601 拼写（与 Go 一致）。
+/// flow 级 timeout 有意不 cap（运营预算决策，Go validate.go 同注）。
+fn check_budget_caps(flow_id: &str, n: &Map<String, Value>) -> Result<(), String> {
+    if let Some(h) = n.get("errorHandler").and_then(|h| h.as_object()) {
+        check_retry_times_cap(flow_id, h, &format!("node {:?}", node_label(n)))?;
+    }
+    if let Some(s) = n
+        .get("timeout")
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(d) = duration::parse_iso8601(s) {
+            if d > MAX_NODE_TIMEOUT {
+                return Err(format!(
+                    "ir: flow {flow_id:?}: node {:?}: timeout {s} exceeds the \
+                     {MAX_NODE_TIMEOUT_TEXT} cap (plaita#267/#35); a longer budget needs an \
+                     explicit flow-level timeout, which still sits under the worker execution \
+                     deadline",
+                    node_label(n)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `workflow.MaxRetryTimes` applied to one handler object, naming the owner
+/// (`flow` / `node "<id>"`) — Go checkRetryTimesCap 的同款文案。
+fn check_retry_times_cap(
+    flow_id: &str,
+    handler: &Map<String, Value>,
+    owner: &str,
+) -> Result<(), String> {
+    let Some(v) = handler.get("retryTimes").and_then(|v| v.as_f64()) else {
+        return Ok(());
+    };
+    // 非数值/负数留给 de_u64_lenient 的类型层；这里只管值域上界
+    if v <= MAX_RETRY_TIMES as f64 {
+        return Ok(());
+    }
+    Err(format!(
+        "ir: flow {flow_id:?}: {owner}: errorHandler.retryTimes {v} exceeds the cap \
+         {MAX_RETRY_TIMES} (plaita#267/#35): retryTimes multiplies node attempts and would let \
+         a legal flow monopolize a shared worker"
+    ))
 }
 
 /// warn_unknown_keys 的落盘半边：未知键报告（stderr）+ 写进节点 metadata 的

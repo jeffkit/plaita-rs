@@ -116,7 +116,22 @@ impl Flow {
         // 流级重试轮复用（上一轮的 $NODE/$ERROR 残留进重试轮）；本引擎每轮
         // 重建干净上下文——重试轮不应看到失败轮的中间态。依赖该残留的 flow
         // 属于反模式（见 exec 模块注释）。
-        let flow_deadline = self.timeout.map(|t| Instant::now() + t);
+        // 装载期（normalize_timeout）已拒掉超平台 Instant 值域的预算；这里的
+        // checked_add 是程序化构造 Flow 的防御面——裸加在两种 profile 都是
+        // 进程级 panic（r1 移交点），具名错误 fail-closed。
+        let flow_deadline = match self.timeout {
+            None => None,
+            Some(t) => match Instant::now().checked_add(t) {
+                Some(dl) => Some(dl),
+                None => {
+                    return Err(FlowError::Other(format!(
+                        "flow timeout {} exceeds the platform instant range: the budget is \
+                         representable but no runtime deadline can be formed from it",
+                        crate::duration::to_iso(t)
+                    )))
+                }
+            },
+        };
         let mut attempt: u64 = 0;
         loop {
             let rc = RuntimeCtx::new_execution(
@@ -282,12 +297,16 @@ impl Flow {
         host: &Host,
         flow_deadline: Option<Instant>,
     ) -> Result<StepOutcome, FlowError> {
+        // (Some(fd), Some(nt)) 的 min 项受 fd 自身可表示约束，裸加安全；
+        // (None, Some(nt)) 走 checked——节点预算在装载期已被 24h cap 关死，
+        // 这里只防程序化构造：溢出意味着预算大到等效无界，回落无 deadline
+        // 与 min 语义一致。
         let node_deadline: Option<Instant> = match (flow_deadline, node.timeout) {
             (Some(fd), Some(nt)) => {
                 Some(Instant::now() + nt.min(fd.saturating_duration_since(Instant::now())))
             }
             (Some(fd), None) => Some(fd),
-            (None, Some(nt)) => Some(Instant::now() + nt),
+            (None, Some(nt)) => Instant::now().checked_add(nt),
             (None, None) => None,
         };
 
