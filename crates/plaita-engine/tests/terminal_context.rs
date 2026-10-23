@@ -8,6 +8,9 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
+/// 事件账目采集行：(事件种类, 节点 id, 错误, 结果)——按下方 sink 的字段落序。
+type SeenEvent = (String, Option<Value>, Option<String>, Option<Value>);
+
 use plaita_engine::exec::{Event, Host};
 use plaita_engine::{ir, FlowError};
 use serde_json::{json, Value};
@@ -19,13 +22,8 @@ fn load(name: &str) -> plaita_engine::Flow {
 }
 
 /// 收集一次执行的 FlowEnd 载荷。
-fn flow_ends(
-    flow: &plaita_engine::Flow,
-    input: Value,
-    host: Host,
-) -> Vec<(String, Option<Value>, Option<String>, Option<Value>)> {
-    let seen: Arc<Mutex<Vec<(String, Option<Value>, Option<String>, Option<Value>)>>> =
-        Arc::new(Mutex::new(Vec::new()));
+fn flow_ends(flow: &plaita_engine::Flow, input: Value, host: Host) -> Vec<SeenEvent> {
+    let seen: Arc<Mutex<Vec<SeenEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = seen.clone();
     let host = host.listen(Arc::new(move |ev: &Event| {
         if let Event::FlowEnd {
