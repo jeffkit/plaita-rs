@@ -12,6 +12,7 @@ pub mod context;
 pub mod duration;
 pub mod error;
 pub mod exec;
+pub mod flowsource;
 pub mod ir;
 pub mod model;
 pub mod nodes;
@@ -20,6 +21,9 @@ pub mod property;
 pub use context::RuntimeCtx;
 pub use error::FlowError;
 pub use exec::{Event, Host};
+pub use flowsource::{
+    FlowDefinition, FlowSource, FlowSourceConfig, FlowSourceError, LocalFlowStore, MemoryFlowStore,
+};
 pub use model::{Flow, Node, NodeKind};
 pub use property::Property;
 
