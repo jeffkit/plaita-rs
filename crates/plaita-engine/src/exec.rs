@@ -57,6 +57,43 @@ pub struct Host {
     /// 执行级取消意图（Python `cancel_requested`）：粘滞、永不复位，
     /// 节点边界消费。
     cancel_requested: Arc<AtomicBool>,
+    /// 挂起型节点的唤醒订阅注册表（宿主面；Go `SuspendOptions.Subscriptions`
+    /// 同形）。声明了事件订阅的节点挂起时**必须**有注册表——「无唤醒源的
+    /// 挂起」被具名拒绝（Python 订阅失败禁止挂起同款）。
+    subscriptions: Option<Arc<dyn SubscriptionRegistry>>,
+    /// 多租户路由键：订阅注册时携带，恢复注销时优先用挂起态记录值。
+    tenant_id: String,
+}
+
+/// 一次挂起的唤醒订阅请求（plaita EventSubscription 核心字段；Go
+/// `SubscriptionRequest` 同形）。registry 在 register 时填 `subscription_id`。
+#[derive(Debug, Clone)]
+pub struct SubscriptionRequest {
+    pub subscription_id: String,
+    pub event_type: String,
+    pub filter: Value,
+    pub node_id: String,
+    pub correlation_id: String,
+    pub flow_id: String,
+    pub tenant_id: String,
+    /// >0 = 订阅超时（到期由宿主投递 resume_type=timeout 载荷；引擎不自动触发）。
+    pub timeout_seconds: f64,
+}
+
+/// 宿主侧唤醒订阅存储（Redis 版在 worker 层；引擎测试用内存假件）。
+pub trait SubscriptionRegistry: Send + Sync {
+    fn register(&self, req: &mut SubscriptionRequest) -> Result<(), String>;
+    fn unregister(&self, subscription_id: &str, tenant_id: &str) -> Result<(), String>;
+}
+
+impl std::fmt::Debug for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Host")
+            .field("execution_id", &self.execution_id)
+            .field("tenant_id", &self.tenant_id)
+            .field("registry_configured", &self.subscriptions.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Host {
@@ -69,6 +106,27 @@ impl Host {
             execution_id: Some(execution_id.into()),
             ..Host::default()
         }
+    }
+
+    /// Registers the wake-up subscription store (builder style). Required
+    /// before executing a flow whose suspending nodes declare subscriptions.
+    pub fn with_subscriptions(mut self, registry: Arc<dyn SubscriptionRegistry>) -> Host {
+        self.subscriptions = Some(registry);
+        self
+    }
+
+    /// Sets the tenant routing key carried into subscription registrations.
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Host {
+        self.tenant_id = tenant_id.into();
+        self
+    }
+
+    pub(crate) fn subscription_registry(&self) -> Option<&Arc<dyn SubscriptionRegistry>> {
+        self.subscriptions.as_ref()
+    }
+
+    pub(crate) fn tenant_id(&self) -> &str {
+        &self.tenant_id
     }
 
     /// Requests cancellation of this execution (idempotent — Python
@@ -198,8 +256,11 @@ impl Flow {
             }),
             _ => self.run_nodes(&rc, host, flow_deadline),
         };
+        // 挂起不是错误：Go suspend 路径的 FlowEnd 以 nil result/nil error
+        // 上报（"a suspension is reported without an error"）。
         let (result_value, error_text) = match &result {
             Ok(v) => (Some(v.clone()), None),
+            Err(FlowError::Suspended(_)) => (None, None),
             Err(e) => (None, Some(e.to_string())),
         };
         host.emit(Event::FlowEnd {
@@ -253,7 +314,7 @@ impl Flow {
         host: &Host,
         _input: &Value,
     ) -> Result<Value, FlowError> {
-        let flow_deadline = rc.flow_deadline;
+        let flow_deadline = rc.flow_deadline();
         host.emit(Event::FlowStart {
             flow_id: self.id.clone(),
         });
@@ -265,6 +326,7 @@ impl Flow {
         };
         let (result_value, error_text) = match &result {
             Ok(v) => (Some(v.clone()), None),
+            Err(FlowError::Suspended(_)) => (None, None),
             Err(e) => (None, Some(e.to_string())),
         };
         host.emit(Event::FlowEnd {
@@ -305,9 +367,23 @@ impl Flow {
         host: &Host,
         flow_deadline: Option<Instant>,
     ) -> Result<Value, FlowError> {
-        let Some(mut node) = self.find_start() else {
+        let Some(node) = self.find_start() else {
             return Err(FlowError::Other("start node not found".to_string()));
         };
+        self.advance_from(node, rc, host, flow_deadline)
+    }
+
+    /// 共享步进体：从给定节点推进到 end/挂起/失败（execute 的 start 入口与
+    /// resume 的后继入口共用同一套步进记账、取消门与挂起检测——plaita-go
+    /// runNodes 三入口同形注释的移植面）。
+    fn advance_from(
+        &self,
+        start: &Node,
+        rc: &SharedCtx,
+        host: &Host,
+        flow_deadline: Option<Instant>,
+    ) -> Result<Value, FlowError> {
+        let mut node = start;
         loop {
             // 节点边界取消门（plaita#267 波次③；Python runner.py:602-613
             // 同形）：粘滞的 cancel_requested 在本节点入口直接拒绝执行，
@@ -317,6 +393,13 @@ impl Flow {
                 return Err(cancelled_at(node, "before running"));
             }
             let outcome = self.execute_node(node, rc, host, flow_deadline)?;
+            // plaita `is_suspending`：挂起检查先于 end 判断与推进（挂起节
+            // 点不可能是 end；顺序是 Go runNodes 的移植面）。节点结果
+            // （status pending + 订阅绑定）由 suspend_flow 落进 $NODE，
+            // 恢复准入读的正是它。
+            if node.kind.is_suspending() {
+                return Err(self.suspend_flow(rc, host, node, outcome));
+            }
             if node.node_type == "end" {
                 return Ok(outcome.result);
             }
@@ -329,6 +412,91 @@ impl Flow {
                 .find_node(&next)
                 .ok_or_else(|| FlowError::Other("workflow node not found".to_string()))?;
         }
+    }
+
+    /// 挂起边界（plaita-go `Workflow.suspend` 移植）：校验 pending 状态、
+    /// 注册唤醒订阅（宿主注册表必需——无唤醒源的挂起具名拒绝）、把
+    /// subscription_id/subscription_tenant 写进挂起态并落 $NODE，返回
+    /// 携带执行现场的 [`FlowError::Suspended`]。只有根执行可挂起（嵌套
+    /// child/loop/parallel 里的挂起点其恢复位置无法用执行状态表达）。
+    fn suspend_flow(
+        &self,
+        rc: &SharedCtx,
+        host: &Host,
+        node: &Node,
+        outcome: StepOutcome,
+    ) -> FlowError {
+        if !rc.is_root_execution() {
+            return FlowError::Other(format!(
+                "node {:?} suspended inside a nested flow: suspend/resume only supports \
+                 the root flow (the resume position of a nested execution cannot be expressed)",
+                node.id
+            ));
+        }
+        let mut state = outcome.result;
+        let status = state.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status != "pending" {
+            return FlowError::Other(format!(
+                "suspending node {:?} returned status {:?}, want pending",
+                node.id, status
+            ));
+        }
+        let Some(registry) = host.subscription_registry() else {
+            return FlowError::Other(format!(
+                "node {:?} declares an event subscription but no subscription registry is \
+                 configured (attach one with Host::with_subscriptions; plaita refuses to \
+                 suspend without an active wake-up source)",
+                node.id
+            ));
+        };
+        let mut req = match crate::nodes::suspend_spec(node, &state, rc, self, host) {
+            Ok(req) => req,
+            Err(e) => return FlowError::Other(format!("suspend spec for node {:?}: {e}", node.id)),
+        };
+        if req.node_id.is_empty() {
+            req.node_id = node.id.clone();
+        }
+        if req.correlation_id.is_empty() {
+            req.correlation_id = rc.execution_id();
+        }
+        if req.flow_id.is_empty() {
+            req.flow_id = self.id.clone();
+        }
+        if req.tenant_id.is_empty() {
+            req.tenant_id = host.tenant_id().to_string();
+        }
+        if let Err(e) = registry.register(&mut req) {
+            return FlowError::Other(format!(
+                "event subscription failed for node {:?}; refusing to suspend without an \
+                 active subscription: {e}",
+                node.id
+            ));
+        }
+        if req.subscription_id.is_empty() {
+            return FlowError::Other(format!(
+                "subscription registry did not assign an id for node {:?}",
+                node.id
+            ));
+        }
+        if let Value::Object(map) = &mut state {
+            map.insert(
+                "subscription_id".into(),
+                Value::String(req.subscription_id.clone()),
+            );
+            map.insert(
+                "subscription_tenant".into(),
+                Value::String(req.tenant_id.clone()),
+            );
+        }
+        // 只落 $NODE（恢复准入读它）；$LAST_NODE 维持前一个完成节点
+        //（Go runNodes 挂起路径不写 last node 的移植面）。
+        rc.set_node_result(&node.id, state);
+        FlowError::Suspended(Box::new(SuspendedExecution {
+            suspended_node: node.id.clone(),
+            flow: self.clone(),
+            rc: rc.clone(),
+            host: host.clone(),
+        }))
     }
 
     /// One node: timeout budget, retry loop, error/timeout policies, `$ERROR`
@@ -542,12 +710,239 @@ impl Flow {
     }
 }
 
+// -- suspend / resume（plaita-go suspend.go + plaita DistributedStrategy
+//    _handle_resume 的移植面）------------------------------------------------
+
+/// Resume carrier 类型（plaita `ResumeType` 的事件/超时/取消三态；continue/
+/// retry 是非挂起状态的步进载体，对挂起节点具名拒绝）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeKind {
+    Event,
+    Timeout,
+    Cancel,
+}
+
+impl ResumeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ResumeKind::Event => "event",
+            ResumeKind::Timeout => "timeout",
+            ResumeKind::Cancel => "cancel",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ResumeKind> {
+        match s {
+            "event" => Some(ResumeKind::Event),
+            "timeout" => Some(ResumeKind::Timeout),
+            "cancel" => Some(ResumeKind::Cancel),
+            _ => None,
+        }
+    }
+}
+
+/// 私有订阅绑定键（plaita `RESUME_BINDING_KEY`）：手动 resume 可用它把载体
+/// 绑定到挂起期登记的那条订阅，不污染用户载荷——准入校验后剥掉。
+pub const RESUME_BINDING_KEY: &str = "__plaita_subscription_id";
+
+/// 一次挂起的执行现场：flow 定义 + 活上下文（内存中）+ 宿主接线 + 恢复
+/// 位置。[`checkpoint_json`] 供观测/持久化取材；JSON 回放入口属 worker 层
+///（本引擎只做进程内 resume，plaita-go 的 Checkpoint 序列化恢复是 worker
+/// 接线面对应物）。
+#[derive(Clone, Debug)]
+pub struct SuspendedExecution {
+    /// 挂起节点 id。
+    pub suspended_node: String,
+    pub(crate) flow: Flow,
+    pub(crate) rc: SharedCtx,
+    pub(crate) host: Host,
+}
+
+impl SuspendedExecution {
+    /// 挂起节点的存储状态（$NODE 表项：status pending + 唤醒契约 + 订阅绑定）。
+    pub fn node_state(&self) -> Value {
+        self.rc
+            .snapshot_json()
+            .get("nodes")
+            .and_then(|n| n.get(&self.suspended_node))
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    /// 全量上下文快照（诊断/持久化素材；`$NODE`/`$GLOBAL`/`$ENV`/...）。
+    pub fn checkpoint_json(&self) -> Value {
+        self.rc.snapshot_json()
+    }
+
+    /// 挂起节点的订阅 id（注销/绑定对拍用）。
+    pub fn subscription_id(&self) -> Option<String> {
+        self.node_state()
+            .get("subscription_id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
+    /// 对挂起节点施加决策载体并从其后继继续流程（plaita
+    /// `DistributedStrategy._handle_resume` + `EventNode.resume` 的多态分发；
+    /// plaita-go `Workflow.Resume` 的恢复+续跑一步到位——Python 分布式侧
+    /// 只处理被恢复节点，两侧共有可比较面 = 恢复后节点状态）。
+    ///
+    /// 准入（ResumeGuardError 族，执行保持挂起）：节点存在且挂起型、
+    /// status=="pending"、载体类型合法、订阅绑定（plaita#221：event/
+    /// timeout 必须绑定挂起期登记的订阅，event_type 还须一致）。
+    /// 恢复会话的执行预算按 Python worker 语义新鲜发放（flow 自有 timeout
+    /// 或执行级缺省）——否则 24h 审批的恢复会落在早已过期的原 deadline 上。
+    pub fn resume(self, resume_kind: ResumeKind, mut data: Value) -> Result<Value, FlowError> {
+        let guard = |message: String| FlowError::ResumeGuard { message };
+        let node = self.flow.find_node(&self.suspended_node).ok_or_else(|| {
+            guard(format!(
+                "suspended node {:?} is not part of flow {:?}",
+                self.suspended_node, self.flow.id
+            ))
+        })?;
+        if !node.kind.is_suspending() {
+            return Err(guard(format!(
+                "node {:?} is not suspending",
+                self.suspended_node
+            )));
+        }
+        let pending = self.node_state();
+        let pending_status = pending.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if pending_status != "pending" {
+            return Err(guard(format!(
+                "suspending node {:?} is not in pending status: {:?}",
+                self.suspended_node, pending_status
+            )));
+        }
+        check_resume_binding(&pending, resume_kind, &data).map_err(guard)?;
+
+        // 绑定键只用于准入，不进节点载荷（plaita _handle_resume 同款剥离）。
+        if let Value::Object(map) = &mut data {
+            map.remove(RESUME_BINDING_KEY);
+        }
+
+        let budget = self
+            .flow
+            .timeout
+            .unwrap_or_else(crate::budget::default_execution_deadline);
+        self.rc
+            .set_flow_deadline(Instant::now().checked_add(budget));
+
+        let result = crate::nodes::resume_node_body(node, &pending, resume_kind, &data, &self.rc)
+            .map_err(|e| FlowError::ResumeError {
+            message: format!("resume node {:?}: {e}", self.suspended_node),
+        })?;
+
+        self.rc.set_node_result(&node.id, result.clone());
+        self.rc.set_last_node(&node.id);
+        // plaita 的 _handle_resume 对被恢复节点报 on_node_end（不重跑
+        // on_node_start）；worker 用它闭合挂起节点的计时/时间线。
+        self.host.emit(Event::NodeEnd {
+            flow_id: self.flow.id.clone(),
+            node_id: node.id.clone(),
+            node_type: node.node_type.clone(),
+            result: Some(result.clone()),
+            error: None,
+        });
+
+        // 唤醒订阅已消费：注销（plaita _unregister_suspended_subscription；
+        // 失败仅告警，不改变恢复结果）。
+        if let Some(sub_id) = pending.get("subscription_id").and_then(|v| v.as_str()) {
+            if !sub_id.is_empty() {
+                if let Some(registry) = self.host.subscription_registry() {
+                    let tenant = pending
+                        .get("subscription_tenant")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(self.host.tenant_id());
+                    if let Err(e) = registry.unregister(sub_id, tenant) {
+                        eprintln!("[resume] unregister subscription {sub_id:?}: {e}");
+                    }
+                }
+            }
+        }
+
+        let Some(next) = node.next.clone() else {
+            return Err(FlowError::ResumeError {
+                message: format!("resume node {:?} has no next node", self.suspended_node),
+            });
+        };
+        let Some(next_node) = self.flow.find_node(&next) else {
+            return Err(FlowError::Other(format!(
+                "resume node {:?}: next node {next:?} not found",
+                self.suspended_node
+            )));
+        };
+        let deadline = self.rc.flow_deadline();
+        let host = self.host.clone();
+        let flow_result = self.flow.advance_from(next_node, &self.rc, &host, deadline);
+        // resume 会话的收尾信号：宿主 OnFlowEnd 是捕获恢复后上下文的点位；
+        // 再次挂起按无错误上报（同 execute）。
+        let (rv, et) = match &flow_result {
+            Ok(v) => (Some(v.clone()), None),
+            Err(FlowError::Suspended(_)) => (None, None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        host.emit(Event::FlowEnd {
+            flow_id: self.flow.id.clone(),
+            result: rv,
+            error: et,
+        });
+        flow_result
+    }
+}
+
+/// plaita#221 移植：event/timeout 载体必须绑定挂起期登记的订阅。挂起态没有
+/// 订阅 id（宿主驱动的挂起/历史快照）无可比对，放行；event 还须 event_type
+/// 一致（两侧都有值时）。
+fn check_resume_binding(
+    pending: &Value,
+    resume_kind: ResumeKind,
+    data: &Value,
+) -> Result<(), String> {
+    if !matches!(resume_kind, ResumeKind::Event | ResumeKind::Timeout) {
+        return Ok(());
+    }
+    let expected = pending
+        .get("subscription_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let got = data
+        .get("subscription_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| data.get(RESUME_BINDING_KEY).and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if got != expected {
+        return Err(format!(
+            "resume carrier is not bound to the suspended subscription (expected {expected:?}, got {got:?})"
+        ));
+    }
+    if matches!(resume_kind, ResumeKind::Event) {
+        let want_type = pending
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let got_type = data
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !want_type.is_empty() && !got_type.is_empty() && want_type != got_type {
+            return Err(format!(
+                "event type mismatch (suspended on {want_type:?}, carrier carries {got_type:?})"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Reports whether a context-deadline error was caused by the flow-level
 /// budget rather than the node's own: the recorded flow deadline has passed
 /// and the node deadline is not strictly tighter (plaita
 /// time_limit_by_flow → FLOW_ERROR).
 fn flow_budget_binding(rc: &SharedCtx, node_deadline: Option<Instant>) -> bool {
-    let Some(fd) = rc.flow_deadline else {
+    let Some(fd) = rc.flow_deadline() else {
         return false;
     };
     if Instant::now() < fd {

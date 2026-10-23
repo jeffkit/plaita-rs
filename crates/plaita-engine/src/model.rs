@@ -195,6 +195,94 @@ pub enum NodeKind {
         child_flow: Box<Flow>,
         input: Option<Value>,
     },
+    /// event（event_node.py EventNode，挂起型基类族）：等待外部事件后继续。
+    /// execute 产出 pending 事件契约（event_id/status/event_type/event_filter/
+    /// is_async），等待与恢复全在引擎外（订阅注册表是宿主面）。
+    Event {
+        core: ExtendedCore,
+    },
+    /// hitl_await（plaita-nodes hitl_await.py，挂起版人工确认）：execute 发
+    /// 消息拿 session_id 即挂起（dry_run 短路）；回复经 hitl_reply 事件唤醒。
+    HitlAwait {
+        message: Option<Value>,
+        images: Option<Value>,
+        base_url: Option<Value>,
+        timeout_secs: Option<Value>,
+        event_type: String,
+        event_filter: Option<Value>,
+        dry_run: bool,
+    },
+    /// delay（server/nodes/delay_node.py）：解析时长产出 delay service_config
+    /// 后挂起；真正的排程等待在外部 delay service（节点进程内不等待）。
+    Delay {
+        core: ExtendedCore,
+        delay_seconds: Value,
+        delay_unit: String,
+    },
+    /// approval（server/nodes/approval_node.py）：固定订阅 approval_decision；
+    /// 缺省 24h 订阅超时（显式 null=无限等待，ir 层折叠为 -1 哨兵）。
+    Approval {
+        core: ExtendedCore,
+        approval_title: Value,
+        approval_content: Value,
+        approval_type: String,
+        approvers: Vec<Value>,
+        approval_strategy: String,
+        auto_escalation: bool,
+        escalation_timeout_hours: Option<i64>,
+        escalation_approvers: Vec<Value>,
+        form_fields: Vec<Value>,
+        allow_comments: Option<bool>,
+        require_comments: bool,
+        notification_config: Option<Value>,
+    },
+    /// redis_queue（server/nodes/redis_queue_node.py）：固定订阅
+    /// redis_message；节点自身不连接 Redis。
+    RedisQueue {
+        core: ExtendedCore,
+        redis_host: Option<Value>,
+        redis_port: Option<i64>,
+        redis_db: Option<i64>,
+        redis_password: Option<Value>,
+        queue_name: Value,
+        queue_type: String,
+        timeout_seconds: Option<i64>,
+        batch_size: Option<i64>,
+        message_format: String,
+    },
+    /// kafka_queue（server/nodes/kafka_queue_node.py）：固定订阅
+    /// kafka_message；节点自身不连接 Kafka。
+    KafkaQueue {
+        core: ExtendedCore,
+        bootstrap_servers: Value,
+        security_protocol: String,
+        sasl_mechanism: Option<Value>,
+        sasl_username: Option<Value>,
+        sasl_password: Option<Value>,
+        topic: Value,
+        partition: Option<i64>,
+        group_id: Value,
+        auto_offset_reset: String,
+        enable_auto_commit: Option<bool>,
+        max_poll_records: Option<i64>,
+        message_format: String,
+        timeout_ms: Option<i64>,
+    },
+    /// http_callback（server/nodes/http_callback_node.py）：固定订阅
+    /// http_callback；节点自身不监听端口。
+    HttpCallback {
+        core: ExtendedCore,
+        callback_path: Option<Value>,
+        callback_method: String,
+        callback_timeout_minutes: Option<i64>,
+        require_auth: Option<bool>,
+        auth_type: String,
+        auth_token: Option<Value>,
+        validate_headers: Option<Value>,
+        validate_params: Option<Value>,
+        success_response: Option<Value>,
+        error_response: Option<Value>,
+    },
     Parallel {
         branches: Vec<ParallelBranchDef>,
         is_conditional: bool,
@@ -219,6 +307,34 @@ pub enum NodeKind {
         headers: Option<Value>,
         body: Option<Value>,
     },
+}
+
+/// 挂起型节点共享的事件核心（Go extendedEventCore 同形）：event_type 装载期
+/// 已按契约填充（approval/redis_queue/kafka_queue/http_callback 强制覆盖，
+/// delay 缺省 delay_trigger 可配，event 为作者字段）；subscription_timeout 的
+/// None=字段缺省、Some(-1)=显式 null（无限等待哨兵，ir 层折叠）。
+#[derive(Debug, Clone)]
+pub struct ExtendedCore {
+    pub event_type: String,
+    pub event_filter: Option<Value>,
+    pub subscription_timeout: Option<f64>,
+}
+
+impl NodeKind {
+    /// plaita `is_suspending` 类属性：执行本节点会把流程挂起（等待/恢复全在
+    /// 引擎外）。与 [`crate::nodes::SUSPENDING_NODE_TYPES`] 保持一致。
+    pub fn is_suspending(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::Event { .. }
+                | NodeKind::HitlAwait { .. }
+                | NodeKind::Delay { .. }
+                | NodeKind::Approval { .. }
+                | NodeKind::RedisQueue { .. }
+                | NodeKind::KafkaQueue { .. }
+                | NodeKind::HttpCallback { .. }
+        )
+    }
 }
 
 /// A logic node: shared base fields plus the kind payload. Deserialized

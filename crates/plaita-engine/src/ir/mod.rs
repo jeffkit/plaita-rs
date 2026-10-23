@@ -55,12 +55,46 @@ pub fn load(data: &[u8]) -> Result<Flow, String> {
 /// Capability contract version — bump whenever the supported/unsupported
 /// node-type lists change, so consumers caching the manifest don't read a
 /// stale list under an unchanged version (plaita-go#80 discipline).
-pub const CONTRACT_VERSION: &str = "2026-10-23.1";
+pub const CONTRACT_VERSION: &str = "2026-10-23.2";
+
+/// 挂起族节点的部署侧依赖（plaita-go#80 phase 3 的 node_dependencies 键）：
+/// 节点引擎面（pending 载荷/决策载体/订阅契约）已实现，但这些设施在本引擎
+/// 进程外——worker/控制面按同一协议接。
+pub const NODE_DEPENDENCIES: &[(&str, &str)] = &[
+    (
+        "event",
+        "external event publisher + subscription store (engine registers via the host SubscriptionRegistry)",
+    ),
+    (
+        "hitl_await",
+        "hitl-server (message send) + reply poller publishing hitl_reply events",
+    ),
+    (
+        "delay",
+        "delay service consuming {prefix}:delay:queue (Redis ZSET scheduling)",
+    ),
+    (
+        "approval",
+        "approval service consuming {prefix}:approval:queue (console interaction surface)",
+    ),
+    (
+        "redis_queue",
+        "redis queue consumer service publishing redis_message events",
+    ),
+    (
+        "kafka_queue",
+        "kafka consumer service publishing kafka_message events",
+    ),
+    (
+        "http_callback",
+        "callback ingress forwarding requests to the handle_callback_request family",
+    ),
+];
 
 /// Capability manifest（plaita#300 五键形态，plaita-go#80 parity）：console/
-/// 上层 worker 可据此做 publish/start 能力门。`features`/`node_dependencies`
-/// 恒空——本引擎无 checkpoint/hitl/suspend 面，也没有依赖部署侧设施的
-/// server 节点（挂起族见 KNOWN_UNSUPPORTED 的逐类 hint）。
+/// 上层 worker 可据此做 publish/start 能力门。`features` 恒空（checkpoint/
+/// hitl/suspend 的宿主侧设施不在引擎面）；`node_dependencies` 逐节点标注
+/// 挂起族的部署侧依赖（服务层/订阅存储）。
 pub fn capability_manifest() -> Value {
     let mut supported: Vec<&str> = SUPPORTED_NODE_TYPES.to_vec();
     supported.sort_unstable();
@@ -69,13 +103,17 @@ pub fn capability_manifest() -> Value {
         .map(|(t, _)| t.to_string())
         .collect();
     unsupported.sort();
+    let mut dependencies = serde_json::Map::new();
+    for (node, dep) in NODE_DEPENDENCIES {
+        dependencies.insert((*node).to_string(), serde_json::json!(dep));
+    }
     serde_json::json!({
         "engine": "plaita-rs",
         "contract_version": CONTRACT_VERSION,
         "supported_node_types": supported,
         "unsupported_node_types": unsupported,
         "features": [],
-        "node_dependencies": {},
+        "node_dependencies": dependencies,
     })
 }
 
@@ -301,6 +339,88 @@ pub(crate) fn node_from_value(v: &Value) -> Result<Node, String> {
             child_flow: child_flow_of(obj)?,
             input: get("input").cloned().filter(|v| !v.is_null()),
         },
+        "event" => NodeKind::Event {
+            core: extended_core_of(obj)?,
+        },
+        "hitl_await" => NodeKind::HitlAwait {
+            message: get("message").cloned().filter(|v| !v.is_null()),
+            images: get("images").cloned().filter(|v| !v.is_null()),
+            base_url: get("base_url").cloned().filter(|v| !v.is_null()),
+            timeout_secs: get("timeout_secs").cloned().filter(|v| !v.is_null()),
+            event_type: get_str("event_type"),
+            event_filter: get("event_filter").cloned().filter(|v| !v.is_null()),
+            dry_run: get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false),
+        },
+        "delay" => NodeKind::Delay {
+            core: extended_core_of(obj)?,
+            delay_seconds: get("delay_seconds").cloned().unwrap_or(Value::Null),
+            delay_unit: get_str("delay_unit"),
+        },
+        "approval" => NodeKind::Approval {
+            approval_title: get("approval_title").cloned().unwrap_or(Value::Null),
+            approval_content: get("approval_content").cloned().unwrap_or(Value::Null),
+            approval_type: get_str("approval_type"),
+            approvers: get("approvers")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            approval_strategy: get_str("approval_strategy"),
+            auto_escalation: get("auto_escalation").and_then(|v| v.as_bool()).unwrap_or(false),
+            escalation_timeout_hours: get("escalation_timeout_hours").and_then(|v| v.as_i64()),
+            escalation_approvers: get("escalation_approvers")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            form_fields: get("form_fields")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            allow_comments: get("allow_comments").and_then(|v| v.as_bool()),
+            require_comments: get("require_comments").and_then(|v| v.as_bool()).unwrap_or(false),
+            notification_config: get("notification_config").cloned().filter(|v| !v.is_null()),
+            core: extended_core_of(obj)?,
+        },
+        "redis_queue" => NodeKind::RedisQueue {
+            core: extended_core_of(obj)?,
+            redis_host: get("redis_host").cloned().filter(|v| !v.is_null()),
+            redis_port: get("redis_port").and_then(|v| v.as_i64()),
+            redis_db: get("redis_db").and_then(|v| v.as_i64()),
+            redis_password: get("redis_password").cloned().filter(|v| !v.is_null()),
+            queue_name: get("queue_name").cloned().unwrap_or(Value::Null),
+            queue_type: get_str("queue_type"),
+            timeout_seconds: get("timeout_seconds").and_then(|v| v.as_i64()),
+            batch_size: get("batch_size").and_then(|v| v.as_i64()),
+            message_format: get_str("message_format"),
+        },
+        "kafka_queue" => NodeKind::KafkaQueue {
+            core: extended_core_of(obj)?,
+            bootstrap_servers: get("bootstrap_servers").cloned().unwrap_or(Value::Null),
+            security_protocol: get_str("security_protocol"),
+            sasl_mechanism: get("sasl_mechanism").cloned().filter(|v| !v.is_null()),
+            sasl_username: get("sasl_username").cloned().filter(|v| !v.is_null()),
+            sasl_password: get("sasl_password").cloned().filter(|v| !v.is_null()),
+            topic: get("topic").cloned().unwrap_or(Value::Null),
+            partition: get("partition").and_then(|v| v.as_i64()),
+            group_id: get("group_id").cloned().unwrap_or(Value::Null),
+            auto_offset_reset: get_str("auto_offset_reset"),
+            enable_auto_commit: get("enable_auto_commit").and_then(|v| v.as_bool()),
+            max_poll_records: get("max_poll_records").and_then(|v| v.as_i64()),
+            message_format: get_str("message_format"),
+            timeout_ms: get("timeout_ms").and_then(|v| v.as_i64()),
+        },
+        "http_callback" => NodeKind::HttpCallback {
+            core: extended_core_of(obj)?,
+            callback_path: get("callback_path").cloned().filter(|v| !v.is_null()),
+            callback_method: get_str("callback_method"),
+            callback_timeout_minutes: get("callback_timeout_minutes").and_then(|v| v.as_i64()),
+            require_auth: get("require_auth").and_then(|v| v.as_bool()),
+            auth_type: get_str("auth_type"),
+            auth_token: get("auth_token").cloned().filter(|v| !v.is_null()),
+            validate_headers: get("validate_headers").cloned().filter(|v| !v.is_null()),
+            validate_params: get("validate_params").cloned().filter(|v| !v.is_null()),
+            success_response: get("success_response").cloned().filter(|v| !v.is_null()),
+            error_response: get("error_response").cloned().filter(|v| !v.is_null()),
+        },
         "parallel" => NodeKind::Parallel {
             branches: match want_array_field(&node_id, "branches", get("branches"))? {
                 Some(a) => a
@@ -398,6 +518,21 @@ fn collection_of(obj: &serde_json::Map<String, Value>) -> Collection {
         Some(Value::Array(a)) => Collection::Array(a.clone()),
         _ => Collection::Expr(String::new()),
     }
+}
+
+/// 挂起族共享的事件核心字段（装载期 translate 已按契约/缺省填充）。
+fn extended_core_of(
+    obj: &serde_json::Map<String, Value>,
+) -> Result<crate::model::ExtendedCore, String> {
+    Ok(crate::model::ExtendedCore {
+        event_type: obj
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        event_filter: obj.get("event_filter").cloned().filter(|v| !v.is_null()),
+        subscription_timeout: obj.get("subscription_timeout").and_then(|v| v.as_f64()),
+    })
 }
 
 /// The optional `itemType` schema (loop 家族共享).

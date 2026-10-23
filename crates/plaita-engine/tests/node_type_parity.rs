@@ -13,19 +13,11 @@ use plaita_engine::ir::{capability_manifest, SUPPORTED_NODE_TYPES};
 
 /// Python 有、本引擎不实现的类型——「不能补的明确列为例外」清单。补齐任一
 /// 类型后必须摘条，摘条动作本身由过期红守着。
-/// ① 挂起族（7）：等待/恢复全在引擎外（订阅存储 + 恢复事件），本引擎无
-///    suspend/resume 架构，实装前置=先建执行架构；
-/// ② 外部宿主族（21）：需要 agentproc/凭据仓/队列/服务商等部署侧基础设施
-///    （sql_query 的驱动选型前置 = plaita-go#84 同源评估）。
+/// 挂起族 7（event/hitl_await/delay/approval/redis_queue/kafka_queue/
+/// http_callback）已随 suspend/resume 架构转正（B4 r12），摘条；
+/// 外部宿主族（21）需要 agentproc/凭据仓/队列/服务商等部署侧基础设施
+/// （sql_query 的驱动选型前置 = plaita-go#84 同源评估）。
 const PYTHON_ONLY_EXCEPTIONS: &[&str] = &[
-    // 挂起族
-    "event",
-    "hitl_await",
-    "delay",
-    "approval",
-    "redis_queue",
-    "kafka_queue",
-    "http_callback",
     // 外部宿主族
     "agentrun",
     "api_request",

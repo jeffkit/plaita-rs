@@ -50,8 +50,10 @@ pub struct RuntimeCtx {
     /// parent (Go CloneContext semantics).
     parent: Option<Arc<RuntimeCtx>>,
     /// Deadline imposed by this flow's own timeout budget (used to attribute
-    /// a timeout to the flow budget vs a node budget).
-    pub flow_deadline: Option<std::time::Instant>,
+    /// a timeout to the flow budget vs a node budget). Lock-guarded: the
+    /// resume path issues a FRESH budget for the continued session
+    /// ([`RuntimeCtx::set_flow_deadline`]).
+    pub flow_deadline: std::sync::RwLock<Option<std::time::Instant>>,
 }
 
 pub type SharedCtx = Arc<RuntimeCtx>;
@@ -61,7 +63,7 @@ impl RuntimeCtx {
         RuntimeCtx {
             inner: RwLock::new(Inner::new()),
             parent: None,
-            flow_deadline: None,
+            flow_deadline: std::sync::RwLock::new(None),
         }
     }
 
@@ -173,7 +175,7 @@ impl RuntimeCtx {
                 execution_id: inner.execution_id.clone(),
             }),
             parent: self.parent.clone(),
-            flow_deadline: self.flow_deadline,
+            flow_deadline: std::sync::RwLock::new(self.flow_deadline()),
         }
     }
 
@@ -296,7 +298,8 @@ impl RuntimeCtx {
             Some(l) => Some(l),
             None => parent.cloned(),
         };
-        ctx.flow_deadline = flow_deadline.or_else(|| parent.and_then(|p| p.flow_deadline));
+        let inherited = flow_deadline.or_else(|| parent.and_then(|p| p.flow_deadline()));
+        *ctx.flow_deadline.write().unwrap() = inherited;
         ctx.shared()
     }
 
@@ -361,6 +364,27 @@ impl RuntimeCtx {
 
     pub fn execution_id(&self) -> String {
         self.inner.read().unwrap().execution_id.clone()
+    }
+
+    /// Root execution?（挂起边界的作用域闸：只有根流程可以挂起——嵌套
+    /// child/loop/parallel 里的挂起点，其恢复位置无法用执行状态表达，
+    /// 具名拒绝，Go checkpoint v1.5 同款范围规则。）
+    pub fn is_root_execution(&self) -> bool {
+        self.parent.is_none()
+    }
+
+    /// Updates the flow budget deadline (the resume path issues a fresh
+    /// execution budget for the continued session — the suspended lease is
+    /// over; a 24h approval resume would otherwise land on an expired
+    /// deadline from the original run).
+    pub fn set_flow_deadline(&self, deadline: Option<std::time::Instant>) {
+        *self.flow_deadline.write().unwrap() = deadline;
+    }
+
+    /// Reads the flow budget deadline (method form for the lock; direct
+    /// field access is a lock guard away).
+    pub fn flow_deadline(&self) -> Option<std::time::Instant> {
+        *self.flow_deadline.read().unwrap()
     }
 
     /// A JSON snapshot of the whole context (diagnostics / tests).

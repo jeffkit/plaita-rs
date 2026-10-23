@@ -9,6 +9,9 @@ mod condition;
 mod http;
 #[cfg(not(feature = "http"))]
 mod http_stub;
+mod suspend;
+
+pub(crate) use suspend::{resume_node_body, suspend_spec};
 
 use serde_json::{json, Value};
 
@@ -180,6 +183,175 @@ pub fn execute_node_body(
             deadline,
             host.cancel_event_flag(),
         ),
+        NodeKind::Event { core } => {
+            suspend::execute_event(core, node, rc).map(|result| StepOutcome {
+                result,
+                next: node.next.clone(),
+            })
+        }
+        NodeKind::HitlAwait {
+            message,
+            images,
+            base_url,
+            timeout_secs,
+            event_type: _,
+            event_filter: _,
+            dry_run,
+        } => suspend::execute_hitl_await(
+            node,
+            message.as_ref(),
+            images.as_ref(),
+            base_url.as_ref(),
+            timeout_secs.as_ref(),
+            *dry_run,
+            rc,
+        )
+        .map(|result| StepOutcome {
+            result,
+            next: node.next.clone(),
+        }),
+        NodeKind::Delay {
+            core,
+            delay_seconds,
+            delay_unit,
+        } => suspend::execute_delay(node, core, delay_seconds, delay_unit, rc).map(|result| {
+            StepOutcome {
+                result,
+                next: node.next.clone(),
+            }
+        }),
+        NodeKind::Approval {
+            core,
+            approval_title,
+            approval_content,
+            approval_type,
+            approvers,
+            approval_strategy,
+            auto_escalation,
+            escalation_timeout_hours,
+            escalation_approvers,
+            form_fields,
+            allow_comments,
+            require_comments,
+            notification_config,
+        } => suspend::execute_approval(
+            node,
+            core,
+            approval_title,
+            approval_content,
+            approval_type,
+            approvers,
+            approval_strategy,
+            *auto_escalation,
+            *escalation_timeout_hours,
+            escalation_approvers,
+            form_fields,
+            *allow_comments,
+            *require_comments,
+            notification_config.as_ref(),
+            rc,
+        )
+        .map(|result| StepOutcome {
+            result,
+            next: node.next.clone(),
+        }),
+        NodeKind::RedisQueue {
+            core,
+            redis_host,
+            redis_port,
+            redis_db,
+            redis_password,
+            queue_name,
+            queue_type,
+            timeout_seconds,
+            batch_size,
+            message_format,
+        } => suspend::execute_redis_queue(
+            node,
+            core,
+            redis_host.as_ref(),
+            *redis_port,
+            *redis_db,
+            redis_password.as_ref(),
+            queue_name,
+            queue_type,
+            *timeout_seconds,
+            *batch_size,
+            message_format,
+            rc,
+        )
+        .map(|result| StepOutcome {
+            result,
+            next: node.next.clone(),
+        }),
+        NodeKind::KafkaQueue {
+            core,
+            bootstrap_servers,
+            security_protocol,
+            sasl_mechanism,
+            sasl_username,
+            sasl_password,
+            topic,
+            partition,
+            group_id,
+            auto_offset_reset,
+            enable_auto_commit,
+            max_poll_records,
+            message_format,
+            timeout_ms,
+        } => suspend::execute_kafka_queue(
+            node,
+            core,
+            bootstrap_servers,
+            security_protocol,
+            sasl_mechanism.as_ref(),
+            sasl_username.as_ref(),
+            sasl_password.as_ref(),
+            topic,
+            *partition,
+            group_id,
+            auto_offset_reset,
+            *enable_auto_commit,
+            *max_poll_records,
+            message_format,
+            *timeout_ms,
+            rc,
+        )
+        .map(|result| StepOutcome {
+            result,
+            next: node.next.clone(),
+        }),
+        NodeKind::HttpCallback {
+            core,
+            callback_path,
+            callback_method,
+            callback_timeout_minutes,
+            require_auth,
+            auth_type,
+            auth_token,
+            validate_headers,
+            validate_params,
+            success_response,
+            error_response,
+        } => suspend::execute_http_callback(
+            node,
+            core,
+            callback_path.as_ref(),
+            callback_method,
+            *callback_timeout_minutes,
+            *require_auth,
+            auth_type,
+            auth_token.as_ref(),
+            validate_headers.as_ref(),
+            validate_params.as_ref(),
+            success_response.as_ref(),
+            error_response.as_ref(),
+            rc,
+        )
+        .map(|result| StepOutcome {
+            result,
+            next: node.next.clone(),
+        }),
         NodeKind::Http { .. } => {
             #[cfg(feature = "http")]
             {
