@@ -43,6 +43,7 @@ pub mod registry;
 pub mod retry;
 pub mod state;
 pub mod subscriptions;
+mod watchdog;
 pub mod worker;
 
 pub use backend::{BackendError, PendingEntry, PsubStream, RedisBackend, StreamEntry, TxOp};

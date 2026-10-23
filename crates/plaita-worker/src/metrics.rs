@@ -38,6 +38,18 @@ pub const METRIC_DLQ_TOTAL: &str = "dlq_total";
 pub const METRIC_RETRY_TOTAL: &str = "retry_total";
 /// Duplicate-start idempotent acks / self-feed escapes (labels tenant/reason).
 pub const METRIC_TASK_DEDUP_HIT_TOTAL: &str = "task_dedup_hit_total";
+/// Lease acquisitions at the execution-entry points (label tenant).
+pub const METRIC_LEASE_ACQUIRED: &str = "lease_acquired";
+/// Mid-run lease losses (§5.3 watchdog; label tenant).
+pub const METRIC_LEASE_LOST: &str = "lease_lost";
+/// One engine invocation's wall-clock occupancy (labels tenant/flow/status).
+pub const METRIC_EXEC_DURATION: &str = "exec_duration";
+/// Executions terminalized by the worker-level execution budget (#35,
+/// plaita#267; label tenant).
+pub const METRIC_EXEC_DEADLINE_TOTAL: &str = "exec_deadline_total";
+/// enqueue→execution latency of any carrier advancing an existing execution
+/// (#31; labels tenant/resume_type).
+pub const METRIC_EVENT_WAKE_LATENCY: &str = "event_wake_latency";
 
 /// A recording sink for tests (labels joined into a stable key).
 #[derive(Default)]

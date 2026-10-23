@@ -121,8 +121,14 @@ impl RunHistory {
         ev_clone
     }
 
-    fn snapshot_node_timings(&self) -> Value {
+    pub(crate) fn snapshot_node_timings(&self) -> Value {
         Value::Object(self.inner.lock().unwrap().node_timings.clone())
+    }
+
+    /// The enqueue→execution wait carried from the producer timestamp (the
+    /// event_wake_latency source; None when unparsable).
+    pub(crate) fn queue_wait_ms(&self) -> Option<f64> {
+        self.inner.lock().unwrap().queue_wait_ms
     }
 
     /// Folds the captured node results + last completed node into the
@@ -696,6 +702,10 @@ impl Worker {
             }
             Err(e) => return Err(WorkerError::transient(format!("lease acquire: {e}"))),
         };
+        self.metrics.inc_counter(
+            crate::metrics::METRIC_LEASE_ACQUIRED,
+            &[("tenant", tenant.as_str())],
+        );
 
         // Idempotency gate (§9.3): a carrier for an execution that already
         // has a state row never re-runs the flow; terminal rows are never
@@ -972,6 +982,10 @@ impl Worker {
             }
             Err(e) => return Err(WorkerError::transient(format!("resume lease acquire: {e}"))),
         };
+        self.metrics.inc_counter(
+            crate::metrics::METRIC_LEASE_ACQUIRED,
+            &[("tenant", tenant.as_str())],
+        );
         let release = |w: &Worker, h: &LeaseHandle| {
             let _ = lease::release_with(w.backend.as_ref(), &w.cfg, h);
         };
@@ -1086,6 +1100,10 @@ impl Worker {
                 )))
             }
         };
+        self.metrics.inc_counter(
+            crate::metrics::METRIC_LEASE_ACQUIRED,
+            &[("tenant", tenant.as_str())],
+        );
         let state_row = state::load(self.backend.as_ref(), &self.cfg, &tenant, &execution_id)?;
         let r = match state_row {
             None => Ok(()),
@@ -1390,12 +1408,25 @@ impl Worker {
         continuation: bool,
     ) -> Result<(), WorkerError> {
         let tenant = task.tenant_id.clone();
-        let _exec_started = std::time::Instant::now();
+        let exec_started = std::time::Instant::now();
         let history = RunHistory::new(&task.timestamp);
         if resume.is_some() || continuation {
             // A continuation of the same execution: carry the previous
             // session's node timings + timeline forward (§6.3).
             history.seed_from(&state_row);
+            // #31: wake latency — enqueue→execution of any carrier advancing
+            // an existing execution (the observable half of
+            // 「挂起/受挫 → 唤醒」; §10.3 event_wake_latency).
+            if let Some(wait) = history.queue_wait_ms() {
+                self.metrics.observe_duration(
+                    crate::metrics::METRIC_EVENT_WAKE_LATENCY,
+                    Duration::from_millis(wait.max(0.0) as u64),
+                    &[
+                        ("tenant", tenant.as_str()),
+                        ("resume_type", task.resume_type.as_str()),
+                    ],
+                );
+            }
         }
         let host = Host::with_execution_id(task.execution_id.clone())
             .with_tenant_id(tenant.clone())
@@ -1411,6 +1442,18 @@ impl Worker {
             *active = Some(ActiveRun { host: host.clone() });
         }
         self.active_tasks.store(1, Ordering::SeqCst);
+
+        // M2 run-scoped watchdogs (watchdog.rs): deadline budget / cancel
+        // poll / lease renew + progress heartbeat.
+        let run_threads = crate::watchdog::spawn_run_watchdogs(
+            self.backend.clone(),
+            self.cfg.clone(),
+            self.stop.clone(),
+            host.clone(),
+            handle.clone(),
+            history.clone(),
+            tenant.clone(),
+        );
 
         // §9.6: the fresh-run fallback is observable.
         if continuation {
@@ -1464,6 +1507,10 @@ impl Worker {
             }
             None => def.workflow.execute(&task.params, &host),
         };
+        // Stop the deadline timer (and the pollers) BEFORE classification:
+        // only firings that happened while the engine was actually running
+        // may drive the terminal verdict (worker.go:939-945).
+        let (deadline_hit, lease_lost, poll_cancel_hit) = run_threads.shutdown();
         self.active.lock().unwrap().take();
         self.active_tasks.store(0, Ordering::SeqCst);
 
@@ -1476,11 +1523,22 @@ impl Worker {
                     ("status", status),
                 ],
             );
+            self.metrics.observe_duration(
+                crate::metrics::METRIC_EXEC_DURATION,
+                exec_started.elapsed(),
+                &[
+                    ("tenant", tenant.as_str()),
+                    ("flow", task.flow_id.as_str()),
+                    ("status", status),
+                ],
+            );
         };
 
-        // Classification order is the §9.5 priority (drain after cancel,
-        // before carrier rejection / suspend / errors / completion).
-        let cancel_hit = matches!(&result, Err(FlowError::Cancelled { .. }))
+        // Classification order is the §9.5 priority: lease_lost → cancel
+        // (标志为准) → drain → carrier rejection → suspend → deadline →
+        // node-retry → error → completion.
+        let engine_cancelled = matches!(&result, Err(FlowError::Cancelled { .. }));
+        let cancel_hit = poll_cancel_hit
             || state::is_cancel_requested(
                 self.backend.as_ref(),
                 &self.cfg,
@@ -1490,7 +1548,29 @@ impl Worker {
             .unwrap_or(None)
             .is_some();
 
-        if cancel_hit && self.force_stopped() {
+        if lease_lost {
+            // §5.3 失租：no terminal write (the fence CAS would refuse it
+            // anyway), release, leave the message pending; the orphan watch
+            // (spawned by the lease watchdog) keeps publishing progress
+            // heartbeats until the run truly ends or a new holder is fenced
+            // in.
+            self.metrics.inc_counter(
+                crate::metrics::METRIC_LEASE_LOST,
+                &[("tenant", tenant.as_str())],
+            );
+            let _ = lease::release_with(self.backend.as_ref(), &self.cfg, handle);
+            eprintln!(
+                "[worker] execution lease lost mid-run; no terminal write, message left \
+                 pending (execution_id={})",
+                task.execution_id
+            );
+            return Err(WorkerError::new(
+                ErrorKind::LeaseLost,
+                format!("execution {} lease lost mid-run", task.execution_id),
+            ));
+        }
+
+        if (cancel_hit || engine_cancelled) && self.force_stopped() {
             // §9.3 D2: the step was abandoned by force-stop. Deliberately NO
             // terminal write — the execution stays resumable and the message
             // remains pending for another worker.
@@ -1508,7 +1588,11 @@ impl Worker {
                 ),
             ));
         }
-        if cancel_hit {
+        if cancel_hit || (engine_cancelled && !deadline_hit) {
+            // A deadline-driven engine cancellation carries NO flag evidence
+            // and falls through to the deadline verdict below; a flag/carrier
+            // cancel (or an embedded-host cancel) terminalizes here. 取消永
+            // 不落 error 行（标志是事实源，worker.go:955-963）。
             eprintln!(
                 "[worker] execution cancelled (execution_id={})",
                 task.execution_id
@@ -1579,6 +1663,54 @@ impl Worker {
             Err(engine_err) => {
                 emit_result("failed");
                 history.apply_to_context(&mut state_row.context);
+                // [M2] §11.3 deadline verdict: after the suspend/lease/drain/
+                // cancel determinations, BEFORE the engine error — a deadline
+                // cancellation must never be re-classified from the error
+                // chain the engine surfaces, nor absorbed by a node policy
+                // (worker.go:1036-1062). Named, non-retryable, ordinary error
+                // terminal: no retry carrier, no DLQ entry.
+                if deadline_hit {
+                    let occupied = exec_started.elapsed().as_secs_f64();
+                    let deadline = self.cfg.execution_deadline_secs;
+                    self.metrics.inc_counter(
+                        crate::metrics::METRIC_EXEC_DEADLINE_TOTAL,
+                        &[("tenant", tenant.as_str())],
+                    );
+                    eprintln!(
+                        "[worker] execution deadline exceeded, terminalizing error \
+                         (non-retryable; execution_id={}, deadline_seconds={deadline}, \
+                         occupied_seconds={occupied:.1})",
+                        task.execution_id
+                    );
+                    let ev = history.record_timeline(
+                        "execution_deadline_exceeded",
+                        json!({"deadline_seconds": deadline, "occupied_seconds": occupied}),
+                    );
+                    self.publish_execution_event(&task.execution_id, &ev);
+                    let err_value = terminal_error_state(
+                        "execution_deadline_exceeded",
+                        FLOW_ERROR_CODE,
+                        &format!(
+                            "execution deadline of {deadline}s exceeded while the run \
+                             occupied the worker for {occupied:.1}s (worker-level budget, \
+                             plaita#267)"
+                        ),
+                        Some(json!({
+                            "deadline_seconds": deadline,
+                            "occupied_seconds": occupied,
+                        })),
+                        None,
+                    );
+                    let r = self.persist_error_terminal(
+                        &tenant,
+                        handle.fence_token,
+                        state_row,
+                        Some(&history),
+                        err_value,
+                    );
+                    let _ = lease::release_with(self.backend.as_ref(), &self.cfg, handle);
+                    return r;
+                }
                 // §9.1 node retry (M2): a retryable Node failure under budget
                 // hands the backoff+re-enqueue choreography to the consumer
                 // loop; at budget it lands in the -520 terminal. Note the go

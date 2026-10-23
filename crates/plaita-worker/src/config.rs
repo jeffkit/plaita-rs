@@ -89,6 +89,14 @@ pub struct Config {
     /// 另 PLAITA_DEFAULT_TENANT_ID 租户缺省）——键面/缺省/告警口径与引擎
     /// `FlowSourceConfig::from_env` 逐字一致；URL 空 = 特性关闭（本地语义）。
     pub flow_source: plaita_engine::flowsource::FlowSourceConfig,
+    /// PLAITA_EXECUTION_DEADLINE_SECONDS（#35/plaita#267，默认 1800）——
+    /// worker 级执行预算：单次引擎调用占据单消费者的墙钟上限（挂起等待不
+    /// 占预算——resume/continue 载体拿新预算）。env 非法/≤0 回默认 + 具名
+    /// WARNING（绝不静默无界，config.go:483-498 同口径）；**显式负值仅
+    /// Config 结构可表达**（关闸是部署决策，env 永远关不掉）。
+    pub execution_deadline_secs: f64,
+    /// PLAITA_CANCEL_POLL_MS（默认 1000）——在途执行的取消标志轮询间隔。
+    pub cancel_poll_ms: i64,
 }
 
 impl Default for Config {
@@ -127,6 +135,8 @@ impl Config {
             flow_cache_ttl_secs: env_i64(&getenv, "PLAITA_FLOW_CACHE_TTL_SECONDS", 300),
             heartbeat_interval_secs: env_i64(&getenv, "PLAITA_HEARTBEAT_INTERVAL_SECONDS", 10),
             registry_ttl_secs: env_i64(&getenv, "PLAITA_REGISTRY_TTL_SECONDS", 30),
+            execution_deadline_secs: env_deadline_seconds(&getenv),
+            cancel_poll_ms: env_i64(&getenv, "PLAITA_CANCEL_POLL_MS", 1000),
             flow_source: plaita_engine::flowsource::FlowSourceConfig::from_getenv(&getenv),
         };
         cfg.normalize();
@@ -204,6 +214,14 @@ impl Config {
         if self.registry_ttl_secs <= 0 {
             self.registry_ttl_secs = 30;
         }
+        if self.cancel_poll_ms <= 0 {
+            self.cancel_poll_ms = 1000;
+        }
+        // execution_deadline_secs: env 解析已按「非法/≤0 回默认 + WARNING」
+        // 处理；这里只兜结构体直构的 NaN。
+        if self.execution_deadline_secs.is_nan() {
+            self.execution_deadline_secs = DEFAULT_EXECUTION_DEADLINE_SECS;
+        }
     }
 
     /// The tenant-routed key namespace (§3): the plain prefix for the
@@ -264,6 +282,36 @@ fn env_f64(getenv: &impl Fn(&str) -> String, key: &str, default: f64) -> f64 {
     }
     v.trim().parse().unwrap_or(default)
 }
+
+/// Worker-level execution budget default (§11.3: 1800s, the same value the
+/// engine's budget layer uses — the double layer composes to the stricter
+/// one naturally).
+pub const DEFAULT_EXECUTION_DEADLINE_SECS: f64 = 1800.0;
+
+/// PLAITA_EXECUTION_DEADLINE_SECONDS (config.go:483-498 同口径): unset →
+/// default; non-numeric / non-finite / ≤0 → default + named WARNING (never a
+/// silent unbounded run). A NEGATIVE budget is only expressible by assigning
+/// the Config struct directly (disabling the budget is a deployment
+/// decision, never an env accident).
+fn env_deadline_seconds(getenv: &impl Fn(&str) -> String) -> f64 {
+    let v = getenv("PLAITA_EXECUTION_DEADLINE_SECONDS");
+    if v.is_empty() {
+        return DEFAULT_EXECUTION_DEADLINE_SECS;
+    }
+    match v.trim().parse::<f64>() {
+        Ok(n) if n.is_finite() && n > 0.0 => n,
+        other => {
+            eprintln!(
+                "[config] invalid {PLAITA_DEADLINE_ENV}={v:?} (parsed {other:?}); falling back \
+                 to the default {DEFAULT_EXECUTION_DEADLINE_SECS}s — the budget is never \
+                 silently unbounded (set a positive value to configure it)"
+            );
+            DEFAULT_EXECUTION_DEADLINE_SECS
+        }
+    }
+}
+
+const PLAITA_DEADLINE_ENV: &str = "PLAITA_EXECUTION_DEADLINE_SECONDS";
 
 /// Naive local ISO timestamp the Python side writes
 /// (`datetime.now().isoformat()` — no timezone suffix, §6.1).
