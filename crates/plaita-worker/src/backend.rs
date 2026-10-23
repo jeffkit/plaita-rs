@@ -132,6 +132,10 @@ pub trait RedisBackend: Send + Sync {
     fn sadd(&self, key: &str, member: &str) -> BackendResult<()>;
     fn srem(&self, key: &str, member: &str) -> BackendResult<()>;
     fn smembers(&self, key: &str) -> BackendResult<Vec<String>>;
+    /// SCAN with a MATCH glob (COUNT 100 per page, iterated to cursor 0).
+    /// The retry budget's per-node key scan uses it (retry.go MaxNodeRetry);
+    /// production-unsafe KEYS is never used.
+    fn scan_match(&self, pattern: &str) -> BackendResult<Vec<String>>;
     fn zadd(&self, key: &str, score: f64, member: &str) -> BackendResult<()>;
     fn zrem(&self, key: &str, member: &str) -> BackendResult<()>;
     /// ZRANGEBYSCORE min max (inclusive bounds) limited to `count`.

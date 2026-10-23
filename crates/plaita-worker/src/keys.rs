@@ -59,6 +59,47 @@ pub fn fencegen_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
     )
 }
 
+/// `{ns}:execution:noderetry:{id}[:{node}]` — per-node retry budget counter
+/// (sliding TTL 7d; without the node segment = execution-level fallback,
+/// §9.1 / retry.go:15-27).
+pub fn noderetry_key(cfg: &Config, tenant: &str, execution_id: &str, node_id: &str) -> String {
+    let base = format!(
+        "{}:execution:noderetry:{}",
+        cfg.namespace(tenant),
+        execution_id
+    );
+    if node_id.is_empty() {
+        base
+    } else {
+        format!("{base}:{node_id}")
+    }
+}
+
+/// `{ns}:execution:noderefetch:{id}` — total retry ceiling counter (100).
+pub fn noderefetch_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!(
+        "{}:execution:noderefetch:{}",
+        cfg.namespace(tenant),
+        execution_id
+    )
+}
+
+/// `{ns}:execution:nofail:{id}` — deterministic-failure ceiling counter (12).
+pub fn nofail_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!(
+        "{}:execution:nofail:{}",
+        cfg.namespace(tenant),
+        execution_id
+    )
+}
+
+/// `{prefix}:exec_tombstone:{id}` — deletion tombstone (platform-root key,
+/// NOT tenant-routed; the console deletion API writes it — §8.3). A tombstone
+/// forbids re-enqueueing carriers for the deleted execution (A51-01).
+pub fn tombstone_key(cfg: &Config, execution_id: &str) -> String {
+    format!("{}:exec_tombstone:{}", cfg.key_prefix, execution_id)
+}
+
 /// `{ns}:execution:cancel:{id}` — cancel intent flag (value = ISO time,
 /// TTL 7d; worker reads, never deletes).
 pub fn cancel_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {

@@ -266,6 +266,35 @@ impl RedisBackend for RedisConnection {
         })
     }
 
+    fn scan_match(&self, pattern: &str) -> BackendResult<Vec<String>> {
+        // SCAN iterates to cursor 0 (COUNT 100 per page); a hard cap guards
+        // against a pathological key space (the callers' scans are per-
+        // execution counter keys, so hitting the cap means something is very
+        // wrong and partial results are the safer answer anyway).
+        const PAGE: u64 = 100;
+        const HARD_CAP: usize = 10_000;
+        self.with_conn(|c| {
+            let mut cursor = 0u64;
+            let mut keys: Vec<String> = Vec::new();
+            loop {
+                let (next, page): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(pattern)
+                    .arg("COUNT")
+                    .arg(PAGE)
+                    .query(c)
+                    .map_err(map_err)?;
+                keys.extend(page);
+                cursor = next;
+                if cursor == 0 || keys.len() >= HARD_CAP {
+                    break;
+                }
+            }
+            Ok(keys)
+        })
+    }
+
     fn zadd(&self, key: &str, score: f64, member: &str) -> BackendResult<()> {
         self.with_conn(|c| {
             let _: i64 = c.zadd(key, member, score).map_err(map_err)?;

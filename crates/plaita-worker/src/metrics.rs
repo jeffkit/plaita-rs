@@ -33,6 +33,11 @@ pub const METRIC_QUEUE_DEPTH: &str = "queue_depth";
 pub const METRIC_EXEC_RESULT: &str = "exec_result";
 /// Dead-letter counter with the low-cardinality `reason` label (§4.4).
 pub const METRIC_DLQ_TOTAL: &str = "dlq_total";
+/// One retry carrier actually went out (requeue, not budget exhaust;
+/// labels tenant/flow/node — §10.3 metrics.go MetricRetryTotal).
+pub const METRIC_RETRY_TOTAL: &str = "retry_total";
+/// Duplicate-start idempotent acks / self-feed escapes (labels tenant/reason).
+pub const METRIC_TASK_DEDUP_HIT_TOTAL: &str = "task_dedup_hit_total";
 
 /// A recording sink for tests (labels joined into a stable key).
 #[derive(Default)]

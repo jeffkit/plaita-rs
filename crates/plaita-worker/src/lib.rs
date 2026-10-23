@@ -40,6 +40,7 @@ pub mod metrics;
 pub mod queue;
 pub mod redis_impl;
 pub mod registry;
+pub mod retry;
 pub mod state;
 pub mod subscriptions;
 pub mod worker;
@@ -63,6 +64,10 @@ pub use redis_impl::RedisConnection;
 pub use registry::{
     Registry, REG_STATUS_DRAINING, REG_STATUS_RUNNING, REG_STATUS_STARTING, REG_STATUS_STOPPED,
     REG_STATUS_STOPPING,
+};
+pub use retry::{
+    node_retry_backoff, set_retry_backoff_base_ms, GuardedDeadLetter, DETERMINISTIC_FAILURE_MAX,
+    NODE_RETRY_TOTAL_MAX,
 };
 pub use state::{ExecutionState, STATUS_SUSPENDED};
 pub use subscriptions::{EventSubscription, RedisSubscriptions};

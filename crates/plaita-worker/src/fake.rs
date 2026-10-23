@@ -130,6 +130,9 @@ pub struct FakeRedis {
     /// Fault injection for tests: the next N rpush calls fail (pins the
     /// park-on-dispatch-failure semantics).
     rpush_failures: AtomicUsize,
+    /// Fault injection for tests: (key prefix, remaining failures) queue for
+    /// GET — pins the probe-failure/fail-closed branches.
+    get_failures: Mutex<Vec<(String, usize)>>,
 }
 
 /// Shared queue + wake condvar for one fake Pub/Sub subscription.
@@ -152,6 +155,7 @@ impl FakeRedis {
             store: Mutex::new(Store::default()),
             subs: Mutex::new(Vec::new()),
             rpush_failures: AtomicUsize::new(0),
+            get_failures: Mutex::new(Vec::new()),
         }
     }
 
@@ -170,6 +174,14 @@ impl FakeRedis {
     pub fn fail_next_rpush(&self, times: usize) {
         self.rpush_failures
             .store(times, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test hook: the next `times` GET calls whose key starts with `prefix`
+    /// fail (fault injection — pins the probe-failure/fail-closed branches).
+    pub fn fail_next_get(&self, prefix: String, times: usize) {
+        if times > 0 {
+            self.get_failures.lock().unwrap().push((prefix, times));
+        }
     }
 
     /// Test hook: XADD under a fixed id (residue-crafting in tests).
@@ -319,8 +331,83 @@ impl FakeRedis {
 
 impl RedisBackend for FakeRedis {
     fn get(&self, key: &str) -> Result_<Option<String>> {
+        {
+            let mut failures = self.get_failures.lock().unwrap();
+            if let Some(pos) = failures
+                .iter()
+                .position(|(prefix, _)| key.starts_with(prefix.as_str()))
+            {
+                failures[pos].1 -= 1;
+                if failures[pos].1 == 0 {
+                    failures.remove(pos);
+                }
+                drop(failures);
+                return io_err(format!("injected get failure ({key})"));
+            }
+        }
         let mut store = self.store.lock().unwrap();
         Ok(Self::string_get(&mut store, key))
+    }
+
+    fn scan_match(&self, pattern: &str) -> Result_<Vec<String>> {
+        let store = self.store.lock().unwrap();
+        let mut keys: Vec<String> = Vec::new();
+        keys.extend(
+            store
+                .strings
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter(|k| glob_match(pattern, k)),
+        );
+        keys.extend(
+            store
+                .sets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter(|k| glob_match(pattern, k)),
+        );
+        keys.extend(
+            store
+                .zsets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter(|k| glob_match(pattern, k)),
+        );
+        keys.extend(
+            store
+                .lists
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter(|k| glob_match(pattern, k)),
+        );
+        keys.extend(
+            store
+                .hashes
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter(|k| glob_match(pattern, k)),
+        );
+        keys.extend(
+            store
+                .streams
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter(|k| glob_match(pattern, k)),
+        );
+        keys.sort();
+        Ok(keys)
     }
 
     fn set(&self, key: &str, value: &str, ttl_secs: Option<i64>) -> Result_<()> {

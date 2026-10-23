@@ -340,11 +340,11 @@ struct ActiveRun {
 
 /// The worker. One consume loop, single in-flight execution (§4.5).
 pub struct Worker {
-    backend: Arc<dyn RedisBackend>,
-    cfg: Config,
-    queue: TaskQueue,
-    subs: Arc<RedisSubscriptions>,
-    metrics: Arc<dyn Metrics>,
+    pub(crate) backend: Arc<dyn RedisBackend>,
+    pub(crate) cfg: Config,
+    pub(crate) queue: TaskQueue,
+    pub(crate) subs: Arc<RedisSubscriptions>,
+    pub(crate) metrics: Arc<dyn Metrics>,
     /// 定义装载入口（B4 第十五轮接线）：本地引擎存储 miss → console 回源
     /// （六 env 键配置，未配置 = 特性关闭本地语义）→ hash 门 → ir::load。
     flows: plaita_engine::flowsource::FlowSource,
@@ -352,9 +352,11 @@ pub struct Worker {
     registry: Arc<registry::Registry>,
     /// 在途执行计数（registry capacity 块随 flush 取值）。
     active_tasks: Arc<std::sync::atomic::AtomicUsize>,
+    /// §9.1 三计数面（retry.rs；M2）。
+    pub(crate) retry_budgets: crate::retry::RetryBudgets,
     drain: Mutex<DrainState>,
     active: Mutex<Option<ActiveRun>>,
-    stop: Arc<AtomicBool>,
+    pub(crate) stop: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -375,6 +377,18 @@ impl Worker {
             cfg.clone(),
             active_tasks.clone(),
         ));
+        let retry_budgets = crate::retry::RetryBudgets::new(backend.clone(), cfg.clone());
+        // §4.4 守卫死信（M2）：投递天花板命中时先过分支表（活租约跳过、
+        // 墓碑放行不克隆、running 且预算尽先终态化、非终态无租约先克隆恢复
+        // 载体再放行——retry.rs GuardedDeadLetter）。
+        queue.set_dead_letter_guard(Arc::new(crate::retry::GuardedDeadLetter {
+            backend: backend.clone(),
+            cfg: cfg.clone(),
+            retries: Arc::new(crate::retry::RetryBudgets::new(
+                backend.clone(),
+                cfg.clone(),
+            )),
+        }));
         Worker {
             backend,
             cfg,
@@ -384,6 +398,7 @@ impl Worker {
             flows,
             registry,
             active_tasks,
+            retry_budgets,
             drain: Mutex::new(DrainState::default()),
             active: Mutex::new(None),
             stop: Arc::new(AtomicBool::new(false)),
@@ -617,6 +632,21 @@ impl Worker {
                 Ok(true)
             }
             Err(e) => {
+                if let Some(nr) = e.node_retry() {
+                    // §9.1: a retryable failure below budget — backoff
+                    // (interruptible shards), enqueue a fresh carrier, ack
+                    // the original. Any failure inside leaves the original
+                    // pending for reclaim.
+                    return match self.requeue_retryable_failure(
+                        &task,
+                        &nr.failed_node,
+                        nr.attempt,
+                        nr.budget,
+                    ) {
+                        Ok(()) => Ok(true),
+                        Err(re) => Err(re),
+                    };
+                }
                 if e.kind().is_carrier_rejected() {
                     // #68: the rejection is permanent by construction; the
                     // execution stays suspended and the loop must not exist
@@ -695,10 +725,55 @@ impl Worker {
                     // start; the takeover write is fenced by our lease.
                 }
                 state::STATUS_RUNNING => {
-                    // Crash-recovery carrier (#47): convert to a continue
-                    // carrier (enqueue → ack; §9.6 fresh-run replay).
+                    // Crash-recovery carrier (#47): convert through the §9.1
+                    // machine (retryCarrierBody — the same converter the
+                    // retry path uses): tombstone → ack without a carrier
+                    // (A51-01); otherwise a continue carrier (enqueue → ack;
+                    // §9.6 fresh-run replay). Probe failure → fail closed,
+                    // the original stays pending and the reclaim retries the
+                    // conversion (绝不 fail-open 重排).
                     let _ = lease::release_with(self.backend.as_ref(), &self.cfg, &handle);
-                    return self.requeue_normalized_continue(&task);
+                    let body = self.retry_carrier_body(&task)?;
+                    let Some(body) = body else {
+                        eprintln!(
+                            "[worker] redelivered start on a deleted execution; acked without \
+                             a carrier (execution_id={execution_id})"
+                        );
+                        return Ok(());
+                    };
+                    if body.get("type").and_then(|t| t.as_str()) == Some("start") {
+                        // #52 self-check: this route may only leave with a
+                        // continue carrier — a start copy here means the row
+                        // vanished between the gate and the probe.
+                        eprintln!(
+                            "[worker] start conversion produced a start copy on a running \
+                             route; poison-acked (execution_id={execution_id})"
+                        );
+                        self.metrics.inc_counter(
+                            crate::metrics::METRIC_TASK_DEDUP_HIT_TOTAL,
+                            &[("tenant", tenant.as_str()), ("reason", "flow_conflict")],
+                        );
+                        return Ok(());
+                    }
+                    if let Err(e) = self.queue.enqueue(&body, task.envelope_schema_ver) {
+                        eprintln!(
+                            "[worker] recovery carrier enqueue failed; original left pending \
+                             for reclaim (execution_id={execution_id}): {e}"
+                        );
+                        return Err(WorkerError::transient(format!(
+                            "recovery carrier enqueue: {e}"
+                        )));
+                    }
+                    self.metrics.inc_counter(
+                        crate::metrics::METRIC_RETRY_TOTAL,
+                        &[("tenant", tenant.as_str()), ("flow", task.flow_id.as_str())],
+                    );
+                    eprintln!(
+                        "[worker] redelivered start on a running execution converted to a \
+                         continue carrier (crash recovery, enqueue→ack; \
+                         execution_id={execution_id}, row_status=running)"
+                    );
+                    return Ok(());
                 }
                 state::STATUS_SUSPENDED => {
                     let _ = lease::release_with(self.backend.as_ref(), &self.cfg, &handle);
@@ -721,8 +796,10 @@ impl Worker {
         }
 
         // A brand-new id must not inherit a stale checkpoint from a previous
-        // life of the same id (§7.3; retry counters are M2).
+        // life of the same id, nor the previous life's retry budgets (§7.3 +
+        // §9.3 fresh-id cleanup: 清三重试计数 + 删残留 checkpoint).
         self.delete_checkpoint(&tenant, &execution_id);
+        self.retry_budgets.reset_all(&tenant, &execution_id);
 
         // Entry cancel checkpoint (§6.2): cancel intent before the running
         // row exists. fence_gen=0 is safe — no live holder can exist yet.
@@ -1487,17 +1564,115 @@ impl Worker {
                 emit_result("suspended");
                 let r = self.persist_suspended(task, handle, &mut state_row, &history, &suspended);
                 let _ = lease::release_with(self.backend.as_ref(), &self.cfg, handle);
+                if r.is_ok() {
+                    // §9.1: nodes that completed before the suspend point
+                    // clear their retry counters (任一节点成功推进即清零).
+                    let succeeded: Vec<String> = {
+                        let h = history.inner.lock().unwrap();
+                        h.node_results.keys().cloned().collect()
+                    };
+                    self.retry_budgets
+                        .reset_on_progress(&tenant, &task.execution_id, &succeeded);
+                }
                 r
             }
             Err(engine_err) => {
-                // M1: no node retry budgets — a failing node lands straight
-                // in the normalized error terminal (§9.5 M1 posture).
+                emit_result("failed");
+                history.apply_to_context(&mut state_row.context);
+                // §9.1 node retry (M2): a retryable Node failure under budget
+                // hands the backoff+re-enqueue choreography to the consumer
+                // loop; at budget it lands in the -520 terminal. Note the go
+                // build additionally snapshots a failure checkpoint here
+                // (#32 mid-flow entry) — rs has no mid-flow entry, so the
+                // converted continue carrier degrades to the observable
+                // fresh-run replay (§9.6) and no snapshot is taken.
+                if let Some(failed_node) = crate::retry::retryable_failed_node(&engine_err) {
+                    let attempt = self
+                        .retry_budgets
+                        .record_node_retry(&tenant, &task.execution_id, &failed_node)
+                        .unwrap_or_else(|e| {
+                            // Counter unreadable: treat as attempt 1 — never
+                            // block a retry on bookkeeping (§9.1 fallback).
+                            eprintln!(
+                                "[retry] node retry counter increment failed (treated as \
+                                 attempt 1) (execution_id={}): {e}",
+                                task.execution_id
+                            );
+                            1
+                        });
+                    let total = self.retry_budgets.record_total(&tenant, &task.execution_id);
+                    let budget = self.cfg.max_deliveries;
+                    let total_exhausted = matches!(&total,
+                        Ok(t) if *t >= crate::retry::NODE_RETRY_TOTAL_MAX);
+                    if attempt >= budget || total_exhausted {
+                        eprintln!(
+                            "[retry] node retry budget exhausted, terminalizing error \
+                             (execution_id={}, node={failed_node}, attempt={attempt}, \
+                             budget={budget}, total={})",
+                            task.execution_id,
+                            total.clone().unwrap_or(0)
+                        );
+                        let err_value = crate::retry::node_retry_exhausted_error(
+                            &failed_node,
+                            attempt,
+                            budget,
+                            total_exhausted,
+                            total.unwrap_or(0),
+                            &engine_err.to_string(),
+                        );
+                        let r = self.persist_error_terminal(
+                            &tenant,
+                            handle.fence_token,
+                            state_row,
+                            Some(&history),
+                            err_value,
+                        );
+                        let _ = lease::release_with(self.backend.as_ref(), &self.cfg, handle);
+                        return r;
+                    }
+                    eprintln!(
+                        "[retry] node retryable failure below budget (execution_id={}, \
+                         node={failed_node}, attempt={attempt}, budget={budget})",
+                        task.execution_id
+                    );
+                    let _ = lease::release_with(self.backend.as_ref(), &self.cfg, handle);
+                    return Err(WorkerError::node_retryable(
+                        crate::error::NodeRetryPayload {
+                            execution_id: task.execution_id.clone(),
+                            failed_node,
+                            attempt,
+                            budget,
+                        },
+                    ));
+                }
+                if matches!(&engine_err, FlowError::Node { .. }) {
+                    // Deterministic node failure (§9.1 layer 3): the counter
+                    // is the only convergence signal for non-retryable
+                    // failures; the ceiling breach is surfaced loudly (the
+                    // ordinary error terminal stands either way).
+                    match self
+                        .retry_budgets
+                        .record_deterministic(&tenant, &task.execution_id)
+                    {
+                        Ok(n) if n >= crate::retry::DETERMINISTIC_FAILURE_MAX => {
+                            eprintln!(
+                                "[retry] deterministic node failures reached the ceiling; \
+                                 execution stays terminalized (execution_id={}, count={n}, \
+                                 max={})",
+                                task.execution_id,
+                                crate::retry::DETERMINISTIC_FAILURE_MAX
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("[retry] deterministic failure counter increment failed: {e}")
+                        }
+                    }
+                }
                 eprintln!(
                     "[worker] execution failed (execution_id={}): {engine_err}",
                     task.execution_id
                 );
-                emit_result("failed");
-                history.apply_to_context(&mut state_row.context);
                 let err_value = normalize_engine_error(&engine_err);
                 let r = self.persist_error_terminal(
                     &tenant,
@@ -1532,6 +1707,19 @@ impl Worker {
                 )
                 .map_err(|e| WorkerError::transient(format!("completed persist: {e}")));
                 let _ = lease::release_with(self.backend.as_ref(), &self.cfg, handle);
+                if r.is_ok() {
+                    // §9.1: a fully successful run resets every counter —
+                    // the executed nodes' per-node budgets AND the two
+                    // consecutive-failure ceilings.
+                    self.retry_budgets
+                        .reset_consecutive(&tenant, &task.execution_id);
+                    let succeeded: Vec<String> = {
+                        let h = history.inner.lock().unwrap();
+                        h.node_results.keys().cloned().collect()
+                    };
+                    self.retry_budgets
+                        .reset_on_progress(&tenant, &task.execution_id, &succeeded);
+                }
                 r?;
                 self.delete_checkpoint(&tenant, &task.execution_id);
                 Ok(())
