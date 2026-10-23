@@ -297,6 +297,58 @@ test 197P（基线 177+20）/diffcheck 23/23/fmt/clippy 干净；
 指纹必须按实际注入身份计（latest 解析出 2.0 而夹具按 3 计 → 门具名拒，
 反证门在回源路径执法）。
 
+## worker 入位接线：registry manifest + 消费循环读穿透（B4 第十五轮，2026-10-23，rs#17 WK-M1 后继）
+
+**为什么**：r13 交付时「Redis 存储腿与消费循环集成等 worker crate 落地后
+接线」、r12 交付时「registry 接线记 worker 落地后」——WK-M1（`89527bf`，
+plaita-worker crate）合入后两块搁置面在本轮接完，**Rust 池全链入位**：
+worker 消费 + registry + 读穿透 + hash 门 + manifest。
+
+**① registry 写 manifest（对齐 plaita-go #82 `f13819a` 形态）**：新模块
+`plaita-worker/src/registry.rs`——`{prefix}:registry:flow_worker:{instance_id}`
+SETEX（TTL 30s = `PLAITA_REGISTRY_TTL_SECONDS`，心跳 10s =
+`PLAITA_HEARTBEAT_INTERVAL_SECONDS`，整份重写即续期，无独立续期面）。
+ServiceInfo 顶层字段与 go 同形（instance_id/service_type="flow_worker"/
+host/status/start_time/metadata/active_tasks/last_heartbeat）；metadata 挂
+`engine="plaita-rs"`（取自清单自身，同源不两处硬编码）+
+`capability_manifest` = 引擎 `ir::capability_manifest()` **整结构体嵌套
+dict**（console manifest_from_metadata 要求 dict，字符串形态会被判无清单
+fail-open）。生命周期：starting→（run 闸序后）running→（D1）
+draining〔3 次短重试立即落盘〕→ 停机 stopped 墓碑 SETEX 5s → DEL。
+降级口径与 go 一致：清单序列化失败（实际不可达）→ 整体省略两键 +
+具名 WARNING `PLAITA_CAPABILITY_MANIFEST_UNAVAILABLE`，刻意不写「在但为
+空」的清单，不拒启 worker。worker 配置面新增三键：心跳间隔/registry TTL/
+flow_source 六键（`FlowSourceConfig::from_getenv` 与引擎 `from_env` 同源
+装配）。
+
+**② 消费循环接读穿透（r13 的 flowsource 接进 WK-M1 主循环）**：worker
+`RedisFlowStore` 实现引擎 `LocalFlowStore`（`{ns}:flow:{fid}:{ver}` +
+versions SET）；`Worker` 持有 `FlowSource`，`handle_start` 与
+`load_continuation_definition` 两处定义门改走
+`get_flow_definition(&flows, …)`：本地 miss → console 回源（六 env 键，
+未配置 = 特性关闭逐字节同 WK-M1 本地语义）→ r11 hash 门 → `ir::load`。
+错误两态映射：NotFound → `ErrorKind::FlowNotFound`（确定性终态化），
+Transient → `ErrorKind::FlowLoad`（留 pending 等重投）。
+**引擎 trait 加错误面（本轮接口变更）**：`get_raw`/`list_versions` 返回
+`Result`——worker Redis 腿读取可失败，读失败必须落瞬态（重投可愈）而非被
+当成 miss 引去回源甚至终态化；`MemoryFlowStore` 语义不变（Ok 包装）。
+配置了 URL 但构建无 `http` 特性 = 引擎具名构造错误 → worker 侧降级本地
+语义继续跑 + `PLAITA_FLOW_SOURCE_DISABLED` 具名告警，**不拒启**
+（go #82 registry manifest 不可用同款口径）。
+
+**验收（先红后绿）**：变异红×2——负缓存写入失效 → 404 格当场红；
+manifest 键省略 → registry 五键格当场红。绿 = fake 侧读穿透 e2e 5 格
+（本地 miss→回源→执行成功〔latest 解析+恰好 2 次调用+回写默认关〕/ 404→
+具名终态+负缓存第二条零调用 / 未配置=本地语义〔消息不得谎称查过
+console〕/ 瞬态 503→不终态化留 PEL 且负缓存未被污染〔换 200 重投即成〕/
+console 侧同版本换定义→resume `flow_hash_mismatch` 具名拒格）+ registry
+单测 5 + **真 Redis 腿 9/9**（WK-M1 旧 4 + 新 5：回源全链
+〔挂起→事件→恢复完成〕/ 404 负缓存 / 未配置 / hash 拒格+allow 放行 /
+registry 全生命周期〔run() 起真心跳 1s→running→五键在册→supported 白名
+单与引擎清单全等→drain→墓碑 DEL〕）。守恒：cargo test 247P（main
+`89527bf` 基线实测 237P + 新案 10）/ diffcheck 23/23 / fmt / clippy -D /
+node-parity 全绿（退出码文件承接）。
+
 ## 审计记录（2026-10-21，四路子智能体对抗审计）
 
 表达式对齐 / ir 契约 / 执行语义与并发 / 红队四路审计，全部 findings 双侧实测。已修复：

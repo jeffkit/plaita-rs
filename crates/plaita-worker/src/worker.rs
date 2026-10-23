@@ -1,15 +1,18 @@
-//! The worker loop (§9, port of worker.go — M1 cut): single-concurrency
-//! consume (reclaim-before-read), start/resume/cancel carrier paths with
-//! the §9.1 disposition table, suspend persistence with the dispatch
-//! credential (§9.4), ResumeGuard-ack (#68), the §9.2 true wake-up over the
-//! engine recovery chain, fresh-run replay for continue carriers (§9.6,
-//! observable), and the D1/D2 drain with the post-read gate.
+//! The worker loop (§9, port of worker.go — M1 cut + B4 round-15
+//! integration): single-concurrency consume (reclaim-before-read),
+//! start/resume/cancel carrier paths with the §9.1 disposition table,
+//! suspend persistence with the dispatch credential (§9.4), ResumeGuard-ack
+//! (#68), the §9.2 true wake-up over the engine recovery chain, fresh-run
+//! replay for continue carriers (§9.6, observable), and the D1/D2 drain
+//! with the post-read gate. Round 15 wires the r13 read-through into the
+//! definition gates (local miss → console pull-through → hash gate →
+//! ir::load) and the §8.1 registry heartbeat with the #82 capability
+//! manifest.
 //!
-//! M1 boundaries (documented, spec §12): no registry heartbeats (M2/M3) —
-//! lease conflicts park conservatively for ALL carriers; no mid-run cancel
-//! poller / lease watchdog / deadline flag (M2) — the engine's own
-//! execution budget bounds every run; no retry budgets (M1 fails the node
-//! straight to the error terminal).
+//! M1 boundaries (documented, spec §12): no mid-run cancel poller / lease
+//! watchdog / deadline flag (M2) — the engine's own execution budget bounds
+//! every run; no retry budgets (M1 fails the node straight to the error
+//! terminal).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,6 +20,7 @@ use std::time::Duration;
 
 use plaita_engine::error::FlowError;
 use plaita_engine::exec::{Host, ResumeKind};
+use plaita_engine::flowsource::FlowSource;
 use serde_json::{json, Value};
 
 use crate::backend::RedisBackend;
@@ -29,6 +33,7 @@ use crate::keys;
 use crate::lease::{self, LeaseHandle};
 use crate::metrics::Metrics;
 use crate::queue::{Task, TaskQueue};
+use crate::registry;
 use crate::state::{self, ExecutionState};
 use crate::subscriptions::RedisSubscriptions;
 
@@ -289,6 +294,37 @@ struct ResumeInput {
     data: Value,
 }
 
+/// 定义装载入口的装配（B4 第十五轮）：本地腿 = RedisFlowStore（引擎存储
+/// 形状），回源臂按 `cfg.flow_source`（六 env 键，URL 空 = 特性关闭）。
+/// 配置了 URL 但本构建无 `http` 特性 = 引擎具名构造错误——降级为本地语义
+/// 继续跑并具名告警（`PLAITA_FLOW_SOURCE_DISABLED`），**不拒启 worker**
+/// （plaita-go #82 registry manifest 不可用同款口径：宁可 fail-open 兜底
+/// 可观测降级，不上一个拒绝服务的面）。
+fn build_flow_source(
+    backend: &Arc<dyn RedisBackend>,
+    cfg: &Config,
+) -> plaita_engine::flowsource::FlowSource {
+    let store = Arc::new(flowsource::RedisFlowStore::new(
+        backend.clone(),
+        cfg.clone(),
+    ));
+    match plaita_engine::flowsource::FlowSource::new(store.clone(), cfg.flow_source.clone()) {
+        Ok(fs) => fs,
+        Err(e) => {
+            eprintln!(
+                "[worker] {e}; falling back to local-storage-only semantics \
+                 marker=PLAITA_FLOW_SOURCE_DISABLED"
+            );
+            let feature_off = plaita_engine::flowsource::FlowSourceConfig {
+                url: String::new(),
+                ..cfg.flow_source.clone()
+            };
+            FlowSource::new(store, feature_off)
+                .expect("feature-off FlowSource construction cannot fail")
+        }
+    }
+}
+
 /// The definition-gate outcome (loadContinuationDefinition).
 enum Gate {
     Ready(Box<FlowDefinition>),
@@ -309,6 +345,13 @@ pub struct Worker {
     queue: TaskQueue,
     subs: Arc<RedisSubscriptions>,
     metrics: Arc<dyn Metrics>,
+    /// 定义装载入口（B4 第十五轮接线）：本地引擎存储 miss → console 回源
+    /// （六 env 键配置，未配置 = 特性关闭本地语义）→ hash 门 → ir::load。
+    flows: plaita_engine::flowsource::FlowSource,
+    /// Registry 心跳面（§8.1；#82 manifest 写入）。
+    registry: Arc<registry::Registry>,
+    /// 在途执行计数（registry capacity 块随 flush 取值）。
+    active_tasks: Arc<std::sync::atomic::AtomicUsize>,
     drain: Mutex<DrainState>,
     active: Mutex<Option<ActiveRun>>,
     stop: Arc<AtomicBool>,
@@ -325,16 +368,31 @@ impl Worker {
     pub fn new(backend: Arc<dyn RedisBackend>, cfg: Config, metrics: Arc<dyn Metrics>) -> Worker {
         let queue = TaskQueue::new(backend.clone(), cfg.clone(), metrics.clone());
         let subs = Arc::new(RedisSubscriptions::new(backend.clone(), cfg.clone()));
+        let flows = build_flow_source(&backend, &cfg);
+        let active_tasks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = Arc::new(registry::Registry::new(
+            backend.clone(),
+            cfg.clone(),
+            active_tasks.clone(),
+        ));
         Worker {
             backend,
             cfg,
             queue,
             subs,
             metrics,
+            flows,
+            registry,
+            active_tasks,
             drain: Mutex::new(DrainState::default()),
             active: Mutex::new(None),
             stop: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Registry 面（测试/嵌入式宿主读写注册键用）。
+    pub fn registry(&self) -> Arc<registry::Registry> {
+        self.registry.clone()
     }
 
     pub fn cfg(&self) -> &Config {
@@ -364,6 +422,9 @@ impl Worker {
             "[worker] draining: no new tasks, waiting for in-flight work \
              (reason={reason}, drain_timeout={timeout}s)"
         );
+        // §8.1: the draining transition must be visible immediately or the
+        // dispatcher keeps routing to this instance (3 short retries).
+        self.registry.set_status_flush_draining();
         // D1→D2 escalation: when the bounded wait elapses the drain is
         // upgraded to a force-stop (idempotent; the worker's stop flag cuts
         // the timer short).
@@ -422,6 +483,7 @@ impl Worker {
     /// set. Spawns the residue sweep, the timeout checker and the event
     /// bridge; joins them on exit (each stops within ≤1s).
     pub fn run(&self) -> Result<(), WorkerError> {
+        self.registry.start();
         self.queue.ensure_group()?;
         if let Err(e) = self.queue.sweep_acked_residue() {
             eprintln!("[worker] startup acked-residue sweep failed: {e}");
@@ -471,6 +533,15 @@ impl Worker {
                 events::event_bridge_loop(backend, cfg, Arc::new(queue), subs, stop)
             }));
         }
+        // Registry heartbeat (§8.1 layer 1) — starts BEFORE the running
+        // flip so the entry exists from the first second; the running flip
+        // below persists immediately.
+        {
+            let registry = self.registry.clone();
+            let stop = self.stop.clone();
+            handles.push(std::thread::spawn(move || registry.heartbeat_loop(stop)));
+        }
+        self.registry.set_status(registry::REG_STATUS_RUNNING);
         let mut backoff = Duration::ZERO;
         while !self.draining() && !self.stop.load(Ordering::SeqCst) {
             if backoff > Duration::ZERO && events::sleep_interruptible(&self.stop, backoff) {
@@ -502,6 +573,9 @@ impl Worker {
         for h in handles {
             let _ = h.join();
         }
+        // §9.3 exit sequence: stopped tombstone (SETEX 5s) → DEL — AFTER the
+        // heartbeat thread joined so no flush can resurrect the key.
+        self.registry.shutdown();
         Ok(())
     }
 
@@ -678,11 +752,13 @@ impl Worker {
             return Ok(());
         }
 
-        // Flow definition (§4.6). Missing/unloadable = deterministic error
-        // terminal; transient read failure = leave pending.
+        // Flow definition (§4.6 via the FlowSource chain, B4 round 15):
+        // local engine storage miss → console read-through (when the six
+        // env keys configure it) → r11 hash gate → ir::load. Missing/
+        // unloadable = deterministic error terminal; transient read failure
+        // = leave pending.
         let def = match flowsource::get_flow_definition(
-            self.backend.as_ref(),
-            &self.cfg,
+            &self.flows,
             &tenant,
             &task.flow_id,
             &task.version,
@@ -1152,35 +1228,37 @@ impl Worker {
             );
             return Ok(Gate::PoisonAck);
         }
-        let def = match flowsource::get_flow_definition(
-            self.backend.as_ref(),
-            &self.cfg,
-            &tenant,
-            flow_id,
-            &row.flow_version,
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                if e.kind() == ErrorKind::FlowNotFound {
-                    eprintln!(
-                        "[worker] resume: flow definition not loadable, error terminal \
+        let def =
+            match flowsource::get_flow_definition(&self.flows, &tenant, flow_id, &row.flow_version)
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    if e.kind() == ErrorKind::FlowNotFound {
+                        eprintln!(
+                            "[worker] resume: flow definition not loadable, error terminal \
                          (flow_id={flow_id}, version={}): {e}",
-                        row.flow_version
-                    );
-                    let err_value = terminal_error_state(
-                        "flow_not_found",
-                        FLOW_ERROR_CODE,
-                        &e.to_string(),
-                        None,
-                        None,
-                    );
-                    self.delete_checkpoint(&tenant, &task.execution_id);
-                    self.persist_error_terminal(&tenant, fence_gen, row.clone(), None, err_value)?;
-                    return Ok(Gate::TerminalDone);
+                            row.flow_version
+                        );
+                        let err_value = terminal_error_state(
+                            "flow_not_found",
+                            FLOW_ERROR_CODE,
+                            &e.to_string(),
+                            None,
+                            None,
+                        );
+                        self.delete_checkpoint(&tenant, &task.execution_id);
+                        self.persist_error_terminal(
+                            &tenant,
+                            fence_gen,
+                            row.clone(),
+                            None,
+                            err_value,
+                        )?;
+                        return Ok(Gate::TerminalDone);
+                    }
+                    return Err(WorkerError::transient(format!("resume flow load: {e}")));
                 }
-                return Err(WorkerError::transient(format!("resume flow load: {e}")));
-            }
-        };
+            };
         // §9.2 fingerprint hard gate: resuming a checkpoint against a changed
         // flow silently corrupts the run.
         let allow = task
@@ -1249,11 +1327,13 @@ impl Worker {
             )
             .listen(history.clone().sink());
 
-        // Register the in-flight run for the D2 cooperative cancel.
+        // Register the in-flight run for the D2 cooperative cancel (the
+        // count feeds the registry capacity block).
         {
             let mut active = self.active.lock().unwrap();
             *active = Some(ActiveRun { host: host.clone() });
         }
+        self.active_tasks.store(1, Ordering::SeqCst);
 
         // §9.6: the fresh-run fallback is observable.
         if continuation {
@@ -1293,6 +1373,7 @@ impl Worker {
                         );
                         let _ = lease::release_with(self.backend.as_ref(), &self.cfg, handle);
                         self.active.lock().unwrap().take();
+                        self.active_tasks.store(0, Ordering::SeqCst);
                         return r;
                     }
                 };
@@ -1307,6 +1388,7 @@ impl Worker {
             None => def.workflow.execute(&task.params, &host),
         };
         self.active.lock().unwrap().take();
+        self.active_tasks.store(0, Ordering::SeqCst);
 
         let emit_result = |status: &str| {
             self.metrics.inc_counter(

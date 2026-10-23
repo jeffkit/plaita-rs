@@ -22,6 +22,7 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::error::{ErrorKind, WorkerError};
@@ -530,82 +531,89 @@ fn python_float_repr(f: f64) -> String {
 
 // -- storage shape -------------------------------------------------------------
 
-/// Reads a flow definition from the engine-storage shape. Deterministic
-/// missing/unloadable → `ErrFlowNotFound` family; transient read failure →
-/// `ErrFlowLoad` (both named on WorkerError).
+/// 引擎存储腿的 Redis 实现（`plaita_engine::flowsource::LocalFlowStore` 的
+/// worker 接入，B4 第十五轮读穿透接线）：形状 = `{ns}:flow:{fid}:{ver}` +
+/// `{ns}:flow_versions:{fid}`（console engine_sync 是生产写入方）。读取
+/// 错误按 trait 契约上抛——被当成 miss 会把「本地可能有、只是读不到」的
+/// 定义错误引去回源甚至终态化。
+pub struct RedisFlowStore {
+    backend: Arc<dyn crate::backend::RedisBackend>,
+    cfg: Config,
+}
+
+impl RedisFlowStore {
+    pub fn new(backend: Arc<dyn crate::backend::RedisBackend>, cfg: Config) -> RedisFlowStore {
+        RedisFlowStore { backend, cfg }
+    }
+}
+
+impl plaita_engine::flowsource::LocalFlowStore for RedisFlowStore {
+    fn get_raw(
+        &self,
+        tenant: &str,
+        flow_id: &str,
+        version: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.backend
+            .get(&keys::flow_key(&self.cfg, tenant, flow_id, version))
+            .map(|o| o.map(String::into_bytes))
+            .map_err(|e| format!("flow definition read: {e}"))
+    }
+
+    fn list_versions(&self, tenant: &str, flow_id: &str) -> Result<Vec<String>, String> {
+        self.backend
+            .smembers(&keys::flow_versions_key(&self.cfg, tenant, flow_id))
+            .map_err(|e| format!("versions set: {e}"))
+    }
+
+    fn put_raw(
+        &self,
+        tenant: &str,
+        flow_id: &str,
+        version: &str,
+        raw: &[u8],
+    ) -> Result<(), String> {
+        preset_flow_definition(
+            self.backend.as_ref(),
+            &self.cfg,
+            tenant,
+            flow_id,
+            version,
+            raw,
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// 定义装载入口（B4 第十五轮接线后的消费循环形态）：[`FlowSource`] 本地
+/// 腿（引擎存储）miss → console 回源（r13 臂，未配置 = 特性关闭、逐字节
+/// 同 WK-M1 本地语义）→ r11 hash 门 → `ir::load`。错误两态映射：
+/// NotFound = 确定性终态族（`ErrorKind::FlowNotFound`），Transient =
+/// 瞬态留 pending（`ErrorKind::FlowLoad`）。
 pub fn get_flow_definition(
-    backend: &dyn crate::backend::RedisBackend,
-    cfg: &Config,
+    flows: &plaita_engine::flowsource::FlowSource,
     tenant: &str,
     flow_id: &str,
     version: &str,
 ) -> Result<FlowDefinition, WorkerError> {
-    let resolved = if version.is_empty() {
-        resolve_version(backend, cfg, tenant, flow_id)?
-    } else {
-        version.to_string()
-    };
-    let raw = backend
-        .get(&keys::flow_key(cfg, tenant, flow_id, &resolved))
-        .map_err(|e| WorkerError::new(ErrorKind::FlowLoad, format!("flow definition read: {e}")))?;
-    let Some(raw) = raw else {
-        return Err(WorkerError::new(
+    match flows.get_flow(tenant, flow_id, version) {
+        Ok(d) => Ok(FlowDefinition {
+            flow_id: d.flow_id,
+            version: d.version,
+            raw: d.raw,
+            hash: d.hash,
+            hash_algo: d.hash_algo.to_string(),
+            workflow: d.flow,
+        }),
+        Err(e) if e.is_not_found() => Err(WorkerError::new(
             ErrorKind::FlowNotFound,
-            format!(
-                "flow definition not found in engine storage: flow {flow_id}:{resolved} \
-                 (tenant {tenant:?})"
-            ),
-        ));
-    };
-    let hash = flow_definition_hash(raw.as_bytes())
-        .map_err(|e| WorkerError::new(ErrorKind::FlowLoad, format!("fingerprint: {e}")))?;
-    // The IR loader is fail-closed: an unloadable flow is a permanent,
-    // deterministic failure for this engine build (AGENTS.md 拒载清单).
-    let workflow = plaita_engine::ir::load(raw.as_bytes()).map_err(|e| {
-        WorkerError::new(
-            ErrorKind::FlowNotFound,
-            format!("flow {flow_id}:{resolved} not loadable: {e}"),
-        )
-    })?;
-    Ok(FlowDefinition {
-        flow_id: flow_id.to_string(),
-        version: resolved,
-        raw: raw.into_bytes(),
-        hash,
-        hash_algo: FLOW_HASH_ALGO.to_string(),
-        workflow,
-    })
-}
-
-/// The empty-version rule: prefer the literal `latest` member, else the
-/// numerically-largest member of the versions set (§4.6).
-fn resolve_version(
-    backend: &dyn crate::backend::RedisBackend,
-    cfg: &Config,
-    tenant: &str,
-    flow_id: &str,
-) -> Result<String, WorkerError> {
-    let mut versions = backend
-        .smembers(&keys::flow_versions_key(cfg, tenant, flow_id))
-        .map_err(|e| WorkerError::new(ErrorKind::FlowLoad, format!("versions set: {e}")))?;
-    if versions.is_empty() {
-        return Ok(LATEST_VERSION.to_string());
+            format!("flow definition unavailable: {e}"),
+        )),
+        Err(e) => Err(WorkerError::new(
+            ErrorKind::FlowLoad,
+            format!("flow load transient: {e}"),
+        )),
     }
-    if versions.iter().any(|v| v == LATEST_VERSION) {
-        return Ok(LATEST_VERSION.to_string());
-    }
-    versions.sort_by(|a, b| {
-        numeric_version_key(a)
-            .partial_cmp(&numeric_version_key(b))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Ok(versions.pop().unwrap_or_else(|| LATEST_VERSION.to_string()))
-}
-
-fn numeric_version_key(v: &str) -> f64 {
-    v.trim_start_matches('v')
-        .parse::<f64>()
-        .unwrap_or(f64::NEG_INFINITY)
 }
 
 /// Writes a definition into the storage shape — used by tests and shadow
@@ -735,25 +743,45 @@ mod tests {
                 },
             ])
             .unwrap();
+        // 读穿透接线后的同一行为面：FlowSource（本地腿 = RedisFlowStore，
+        // 未配置 console URL = 特性关闭）下版本解析规则不变。
+        let flows = flows_over_fake(&cfg, &backend);
         // numeric max (10 beats 2 lexicographically)
-        let err = get_flow_definition(backend.as_ref(), &cfg, "", "f", "").unwrap_err();
+        let err = get_flow_definition(&flows, "", "f", "").unwrap_err();
         // "{}" is not a loadable flow — the version RESOLUTION succeeded and
         // the failure is the deterministic not-loadable family naming 10
         assert!(
-            err.to_string().contains(":10"),
+            err.to_string().contains("f:10"),
             "resolved to numeric max, got: {err}"
         );
         // explicit version wins
-        let err = get_flow_definition(backend.as_ref(), &cfg, "", "f", "2").unwrap_err();
+        let err = get_flow_definition(&flows, "", "f", "2").unwrap_err();
         assert!(
-            err.to_string().contains(":2"),
+            err.to_string().contains("f:2"),
             "explicit version kept, got: {err}"
         );
         // no versions set → literal latest
-        let err = get_flow_definition(backend.as_ref(), &cfg, "", "g", "").unwrap_err();
+        let err = get_flow_definition(&flows, "", "g", "").unwrap_err();
         assert!(
-            err.to_string().contains(":latest"),
+            err.to_string().contains("version latest"),
             "fallback to latest, got: {err}"
         );
+    }
+
+    /// 未配置回源臂的最小 FlowSource（本地腿 = FakeRedis 上的
+    /// RedisFlowStore；URL 空 = 特性关闭）。
+    fn flows_over_fake(
+        cfg: &Config,
+        backend: &std::sync::Arc<crate::fake::FakeRedis>,
+    ) -> plaita_engine::flowsource::FlowSource {
+        let store = std::sync::Arc::new(RedisFlowStore::new(
+            backend.clone() as std::sync::Arc<dyn crate::backend::RedisBackend>,
+            cfg.clone(),
+        ));
+        plaita_engine::flowsource::FlowSource::new(
+            store,
+            plaita_engine::flowsource::FlowSourceConfig::default(),
+        )
+        .expect("feature-off FlowSource construction cannot fail")
     }
 }

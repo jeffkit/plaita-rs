@@ -39,6 +39,7 @@ pub mod lease;
 pub mod metrics;
 pub mod queue;
 pub mod redis_impl;
+pub mod registry;
 pub mod state;
 pub mod subscriptions;
 pub mod worker;
@@ -53,12 +54,16 @@ pub use error::{ErrorKind, WorkerError, FLOW_ERROR_CODE};
 pub use events::{handle_event, sweep_event_timeouts, Event};
 pub use flowsource::{
     canonical_flow_definition_json, flow_definition_hash, get_flow_definition,
-    preset_flow_definition, FlowDefinition, FLOW_HASH_ALGO, LATEST_VERSION,
+    preset_flow_definition, FlowDefinition, RedisFlowStore, FLOW_HASH_ALGO, LATEST_VERSION,
 };
 pub use lease::{holder_instance_id, new_holder_token, LeaseHandle};
 pub use metrics::{Metrics, NoopMetrics, METRIC_DLQ_TOTAL, METRIC_EXEC_RESULT, METRIC_QUEUE_DEPTH};
 pub use queue::{Delivery, Task, TaskQueue};
 pub use redis_impl::RedisConnection;
+pub use registry::{
+    Registry, REG_STATUS_DRAINING, REG_STATUS_RUNNING, REG_STATUS_STARTING, REG_STATUS_STOPPED,
+    REG_STATUS_STOPPING,
+};
 pub use state::{ExecutionState, STATUS_SUSPENDED};
 pub use subscriptions::{EventSubscription, RedisSubscriptions};
 pub use worker::Worker;

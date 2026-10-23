@@ -79,6 +79,16 @@ pub struct Config {
     /// (default 300) — flow definition TTL cache.
     pub flow_cache_size: usize,
     pub flow_cache_ttl_secs: i64,
+    /// PLAITA_HEARTBEAT_INTERVAL_SECONDS (default 10) — registry heartbeat
+    /// period (§8.1 layer 1).
+    pub heartbeat_interval_secs: i64,
+    /// PLAITA_REGISTRY_TTL_SECONDS (default 30) — registry entry SETEX TTL.
+    pub registry_ttl_secs: i64,
+    /// console 读穿透六键（PLAITA_CONSOLE_FLOW_SOURCE_URL / _API_KEY /
+    /// _TIMEOUT_SECONDS / _NEGATIVE_TTL_SECONDS / _ATTEMPTS / _WRITEBACK，
+    /// 另 PLAITA_DEFAULT_TENANT_ID 租户缺省）——键面/缺省/告警口径与引擎
+    /// `FlowSourceConfig::from_env` 逐字一致；URL 空 = 特性关闭（本地语义）。
+    pub flow_source: plaita_engine::flowsource::FlowSourceConfig,
 }
 
 impl Default for Config {
@@ -115,6 +125,9 @@ impl Config {
             drain_timeout_secs: env_f64(&getenv, "PLAITA_WORKER_DRAIN_TIMEOUT", 30.0),
             flow_cache_size: env_i64(&getenv, "PLAITA_FLOW_CACHE_SIZE", 100).max(0) as usize,
             flow_cache_ttl_secs: env_i64(&getenv, "PLAITA_FLOW_CACHE_TTL_SECONDS", 300),
+            heartbeat_interval_secs: env_i64(&getenv, "PLAITA_HEARTBEAT_INTERVAL_SECONDS", 10),
+            registry_ttl_secs: env_i64(&getenv, "PLAITA_REGISTRY_TTL_SECONDS", 30),
+            flow_source: plaita_engine::flowsource::FlowSourceConfig::from_getenv(&getenv),
         };
         cfg.normalize();
         cfg
@@ -184,6 +197,12 @@ impl Config {
         }
         if self.flow_cache_ttl_secs <= 0 {
             self.flow_cache_ttl_secs = 300;
+        }
+        if self.heartbeat_interval_secs <= 0 {
+            self.heartbeat_interval_secs = 10;
+        }
+        if self.registry_ttl_secs <= 0 {
+            self.registry_ttl_secs = 30;
         }
     }
 
