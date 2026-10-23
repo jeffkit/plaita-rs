@@ -16,6 +16,7 @@ struct Harness {
     backend: Arc<FakeRedis>,
     cfg: plaita_worker::Config,
     worker: Arc<Worker>,
+    #[allow(dead_code)] // M2-5 LookupStatus 面后续断言用；当前用例只吃租约/状态
     metrics: Arc<RecordingMetrics>,
 }
 
