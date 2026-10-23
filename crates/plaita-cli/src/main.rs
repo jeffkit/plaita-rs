@@ -6,6 +6,8 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
+mod ns;
+
 #[derive(Parser)]
 #[command(
     name = "plaita-rs",
@@ -48,6 +50,14 @@ enum Command {
         /// Context JSON: keys are roots without the $ ("INPUT", "NODE", ...).
         #[arg(long)]
         context: Option<String>,
+    },
+    /// NS-M4 nested-suspend differential runner (hidden): run one case file
+    /// in-process (execute → suspend → resume…) and print the unified result
+    /// JSON. Driven by tools/nested_suspend_diff/diffcheck.py.
+    #[command(hide = true)]
+    Ns {
+        /// Path to the case JSON.
+        case: String,
     },
 }
 
@@ -154,6 +164,7 @@ fn run(cli: Cli) -> Result<(), String> {
             );
             Ok(())
         }
+        Command::Ns { case } => ns::run(&case),
     }
 }
 
