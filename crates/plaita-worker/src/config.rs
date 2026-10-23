@@ -126,6 +126,10 @@ pub struct Config {
     /// 存储**命名空间，不从 worker KeyPrefix 派生；apply_shadow 在等于默认
     /// 值时改写（影子部署绝不回扫生产事件存储）。
     pub event_storage_prefix: String,
+    /// PLAITA_DISPATCH_LEDGER_KEY（默认 `<KeyPrefix>:dispatch:ledger`）——
+    /// 派发台账流（§6.3；亲和让渡的决策记录写入面）。显式覆盖优先，
+    /// apply_shadow 时派生默认改写（影子台账落影子命名空间，go 同口径）。
+    pub dispatch_ledger_key: String,
 }
 
 impl Default for Config {
@@ -175,6 +179,7 @@ impl Config {
             event_reconcile_backfill_secs: env_reconcile_backfill(&getenv),
             disable_event_reconcile: getenv("PLAITA_DISABLE_EVENT_RECONCILE") == "1",
             event_storage_prefix: getenv("PLAITA_EVENT_STORAGE_PREFIX"),
+            dispatch_ledger_key: getenv("PLAITA_DISPATCH_LEDGER_KEY"),
             flow_source: plaita_engine::flowsource::FlowSourceConfig::from_getenv(&getenv),
         };
         cfg.normalize();
@@ -269,6 +274,9 @@ impl Config {
         if self.event_storage_prefix.is_empty() {
             self.event_storage_prefix = DEFAULT_EVENT_STORAGE_PREFIX.to_string();
         }
+        if self.dispatch_ledger_key.is_empty() {
+            self.dispatch_ledger_key = format!("{}:dispatch:ledger", self.key_prefix);
+        }
         // execution_deadline_secs: env 解析已按「非法/≤0 回默认 + WARNING」
         // 处理；这里只兜结构体直构的 NaN。
         if self.execution_deadline_secs.is_nan() {
@@ -310,6 +318,13 @@ impl Config {
         let default_dlq = format!("{default_queue}:dlq");
         if self.dlq_key == derived_dlq || self.dlq_key == default_dlq {
             self.dlq_key = derived_dlq;
+        }
+        let derived_ledger = format!("{}:dispatch:ledger", DEFAULT_KEY_PREFIX);
+        let shadow_ledger = format!("{}:dispatch:ledger", SHADOW_KEY_PREFIX);
+        if self.dispatch_ledger_key == derived_ledger || self.dispatch_ledger_key == shadow_ledger {
+            // 派生默认（default/shadow 形）随影子改写；自定义前缀的派生键
+            // 与显式覆盖保持调用方意图（queue/dlq 同款边界）。
+            self.dispatch_ledger_key = shadow_ledger;
         }
     }
 }

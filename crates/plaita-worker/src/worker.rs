@@ -393,8 +393,9 @@ pub struct Worker {
     /// 定义装载入口（B4 第十五轮接线）：本地引擎存储 miss → console 回源
     /// （六 env 键配置，未配置 = 特性关闭本地语义）→ hash 门 → ir::load。
     flows: plaita_engine::flowsource::FlowSource,
-    /// Registry 心跳面（§8.1；#82 manifest 写入）。
-    registry: Arc<registry::Registry>,
+    /// Registry 心跳面（§8.1；#82 manifest 写入；affinity 亲和闸读他实例
+    /// 状态经 LookupStatus 走这里）。
+    pub(crate) registry: Arc<registry::Registry>,
     /// 在途执行计数（registry capacity 块随 flush 取值）。
     active_tasks: Arc<std::sync::atomic::AtomicUsize>,
     /// §9.1 三计数面（retry.rs；M2）。
@@ -707,6 +708,21 @@ impl Worker {
                 let ev = crate::agegate::task_expired_event(&task, &delivery.envelope.message_id);
                 self.publish_execution_event(&task.execution_id, &ev);
             }
+            self.queue.ack(&task.message_id)?;
+            return Ok(true);
+        }
+        // §9.2 affinity gate (go worker.go:386-388 same slot: after the age
+        // gate, before dispatch): a capacity-routed carrier addressed to
+        // another instance is never DLQ'd — it goes through the bounded
+        // handover protocol (probe → broadcast-or-forward → bounded
+        // terminal). Ok = the carrier reached a terminal disposition in THIS
+        // worker's hands (ack); Err = the original stays pending.
+        if !task.target_instance_id.is_empty() && task.target_instance_id != self.cfg.instance_id {
+            crate::affinity::handle_foreign_target(
+                self,
+                &task,
+                delivery.envelope.payload_raw.as_str(),
+            )?;
             self.queue.ack(&task.message_id)?;
             return Ok(true);
         }
@@ -2287,7 +2303,7 @@ impl Worker {
         Ok(true)
     }
 
-    fn delete_checkpoint(&self, tenant: &str, execution_id: &str) {
+    pub(crate) fn delete_checkpoint(&self, tenant: &str, execution_id: &str) {
         // The state row is authoritative; a cleanup failure only warns (the
         // terminal row bounds the execution's lifecycle either way).
         if let Err(e) = checkpoint::delete(self.backend.as_ref(), &self.cfg, tenant, execution_id) {

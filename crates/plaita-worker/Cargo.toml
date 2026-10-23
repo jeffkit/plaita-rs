@@ -19,6 +19,9 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 sha2 = "0.10"
+# 亲和让渡计数键的无 execution_id 退化腿：body 规范化指纹（go handoverKey
+# 的 crypto/sha1 同款——协议键面逐字对齐，禁止换哈希）。
+sha1 = "0.10"
 # Sync (blocking) client only — the engine is a std::thread model; an async
 # runtime would be net debt for a single-process consume loop (rs-worker
 # design §2.2). `script` runs the lease/fence Lua texts verbatim.
