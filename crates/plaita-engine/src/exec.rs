@@ -318,11 +318,29 @@ impl Flow {
         host.emit(Event::FlowStart {
             flow_id: self.id.clone(),
         });
+        let Some(start) = self.find_start() else {
+            return Err(FlowError::Other("start node not found".to_string()));
+        };
+        self.advance_and_finalize(start, rc, host, flow_deadline)
+    }
+
+    /// 从给定节点推进到 end 并套用本 flow 的收尾链（FlowTimeout 终态 /
+    /// 节点自有超时 abort 的 timeoutHandler 咨询 / FlowEnd 发射）——execute_on
+    /// 的主体，也被恢复续跑循环逐帧复用（验证报告 Q8.1：恢复会话的内层失败
+    /// 必须走与首跑相同的本帧收尾链，不再直抛宿主）。不发 FlowStart（恢复
+    /// 会话约定：无 FlowStart，FlowEnd 可重复、最后一次为准）。
+    pub(crate) fn advance_and_finalize(
+        &self,
+        start: &Node,
+        rc: &SharedCtx,
+        host: &Host,
+        flow_deadline: Option<Instant>,
+    ) -> Result<Value, FlowError> {
         let result: Result<Value, FlowError> = match flow_deadline {
             Some(dl) if Instant::now() >= dl => Err(FlowError::FlowTimeout {
                 message: "context deadline exceeded".to_string(),
             }),
-            _ => self.run_nodes(rc, host, flow_deadline),
+            _ => self.advance_from(start, rc, host, flow_deadline),
         };
         let (result_value, error_text) = match &result {
             Ok(v) => (Some(v.clone()), None),
@@ -601,6 +619,13 @@ impl Flow {
                         ne.suspension.expect("suspension carrier"),
                     ))
                 }
+                // 作用域闸拒绝（验证报告修正清单 #3）：同样不可被 errorHandler
+                // continue 吞（error.rs 的 fail-closed 承诺）。
+                Err(ne) if ne.class == ErrorClass::SuspendRejected => {
+                    return Err(FlowError::SuspendRejected {
+                        message: ne.message,
+                    })
+                }
                 Err(ne) if ne.class == ErrorClass::Timeout => {
                     if flow_budget_binding(rc, node_deadline) {
                         // The flow-level budget is the binding constraint —
@@ -862,6 +887,18 @@ impl SuspendedExecution {
     /// 或执行级缺省）——否则 24h 审批的恢复会落在早已过期的原 deadline 上。
     pub fn resume(self, resume_kind: ResumeKind, mut data: Value) -> Result<Value, FlowError> {
         let guard = |message: String| FlowError::ResumeGuard { message };
+        // 恢复入口取消门（验证报告建议修 #9）：挂起期间 host.cancel() 过的
+        // 执行，恢复被拒（决策载体未消费即弃——worker 层不得在 cancel 后投递
+        // 恢复；引擎侧 fail-closed：副作用不应在取消后照发）。
+        if self.host.is_cancel_requested() {
+            return Err(FlowError::Cancelled {
+                message: format!(
+                    "resume refused: cancel was requested while suspended at node {:?}; \
+                     the carrier was not consumed",
+                    self.suspended_node
+                ),
+            });
+        }
         let node = self.flow.find_node(&self.suspended_node).ok_or_else(|| {
             guard(format!(
                 "suspended node {:?} is not part of flow {:?}",
@@ -955,7 +992,10 @@ impl SuspendedExecution {
             };
             let deadline = current_rc.flow_deadline();
             let host = self.host.clone();
-            match current_flow.advance_from(next_node, &current_rc, &host, deadline) {
+            // 逐帧走 advance_and_finalize（= execute_on 的收尾链）：内层失败
+            // 与首跑同链（FlowTimeout 终态/本帧 timeoutHandler/FlowEnd），不
+            // 直抛宿主（验证报告 Q8.1 修正）；FlowEnd 由 finalize 发射。
+            match current_flow.advance_and_finalize(next_node, &current_rc, &host, deadline) {
                 Ok(value) => {
                     // 返回步按传播序消费：最深帧（index 0）先返回。
                     let frame = if stack.is_empty() {
@@ -964,13 +1004,8 @@ impl SuspendedExecution {
                         Some(stack.remove(0))
                     };
                     match frame {
-                        // 根 flow 完成：恢复会话收尾。
+                        // 根 flow 完成：恢复会话收尾（FlowEnd 已由 finalize 发）。
                         None => {
-                            host.emit(Event::FlowEnd {
-                                flow_id: current_flow.id.clone(),
-                                result: Some(value.clone()),
-                                error: None,
-                            });
                             return Ok(value);
                         }
                         // 调用返回步：值回填父帧（$NODE[child] + outputType 校验
@@ -1006,11 +1041,7 @@ impl SuspendedExecution {
                                 result: Some(value.clone()),
                                 error: None,
                             });
-                            host.emit(Event::FlowEnd {
-                                flow_id: current_flow.id.clone(),
-                                result: Some(value.clone()),
-                                error: None,
-                            });
+                            // 内层 flow 的 FlowEnd 已由 finalize 发射。
                             current_flow = frame.flow.clone();
                             current_rc = frame.rc.clone();
                             current_next = child_node.next.clone();
@@ -1019,21 +1050,13 @@ impl SuspendedExecution {
                 }
                 Err(FlowError::Suspended(mut inner)) => {
                     // 续跑中再次挂起：新现场（更深）的调用栈在前，本会话剩余
-                    // 栈在后拼接；FlowEnd 按无错误上报（同 execute）。
+                    // 栈在后拼接；FlowEnd(nil,nil) 已由 finalize 发射。
                     inner.call_stack.extend(stack);
-                    host.emit(Event::FlowEnd {
-                        flow_id: current_flow.id.clone(),
-                        result: None,
-                        error: None,
-                    });
                     return Err(FlowError::Suspended(inner));
                 }
                 Err(e) => {
-                    host.emit(Event::FlowEnd {
-                        flow_id: current_flow.id.clone(),
-                        result: None,
-                        error: Some(e.to_string()),
-                    });
+                    // 本帧收尾链已套用（含 FlowEnd(error)）：失败按 finalize
+                    // 的结论终态上抛（验证报告 Q8.1 修正——不再绕过本帧收尾链）。
                     return Err(e);
                 }
             }

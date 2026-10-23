@@ -274,9 +274,11 @@ fn suspension_inside_parallel_branch_is_named_rejected() {
     let (host, _registry) = host_with_registry();
     let err = flow.execute(&json!({}), &host).unwrap_err();
     let text = err.to_string();
+    // 静态闸（修正清单 #4）：分支派发前同步具名拒——后台分支的动态拒绝无法
+    // 同步上抛，v1 语义 = 分支图内不允许挂起型节点。
     assert!(
-        text.contains("parallel-branch"),
-        "named parallel-frame rejection expected, got: {text}"
+        text.contains("contains a suspending node"),
+        "named parallel rejection expected, got: {text}"
     );
 }
 

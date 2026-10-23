@@ -231,3 +231,138 @@ fn deep_binding_enforcement_and_timeout_at_depth() {
     let out = bound(suspended, ResumeKind::Timeout, json!({})).unwrap();
     assert_eq!(out["status"], "timeout");
 }
+
+#[test]
+fn loop_reference_bypass_is_named_rejected_without_orphan_subscription() {
+    // 验证报告 Q4 旁路组合：loop → reference → event——reference 的 ambient
+    // 父链遮蔽 frame_chain_blocker，闸放行并注册订阅；传播转换点（主闸）必须
+    // 具名拒绝**并注销该订阅**（无孤儿）。
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingRegistry {
+        registered: AtomicUsize,
+        unregistered: AtomicUsize,
+    }
+    impl plaita_engine::exec::SubscriptionRegistry for CountingRegistry {
+        fn register(&self, req: &mut SubscriptionRequest) -> Result<(), String> {
+            let n = self.registered.fetch_add(1, Ordering::SeqCst) + 1;
+            req.subscription_id = format!("sub-{n}");
+            Ok(())
+        }
+        fn unregister(&self, _id: &str, _t: &str) -> Result<(), String> {
+            self.unregistered.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let registry = Arc::new(CountingRegistry {
+        registered: AtomicUsize::new(0),
+        unregistered: AtomicUsize::new(0),
+    });
+    let host = Host::with_execution_id("exec-1").with_subscriptions(registry.clone());
+
+    let flow_doc = json!({
+        "flow_id": "f",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "lp"},
+            {"type": "loop", "id": "lp", "collection": "$INPUT.items", "next": "o", "childFlow": {
+                "nodes": [
+                    {"type": "start", "id": "a", "next": "r"},
+                    {"flow_id": "sub", "id": "r", "next": "b", "type": "reference"},
+                    {"type": "end", "id": "b", "resultType": "success"},
+                ],
+            }},
+            {"type": "end", "id": "o", "resultType": "success"},
+        ],
+    });
+    struct P;
+    impl plaita_engine::ir::FlowProvider for P {
+        fn load_flow_json(&self, id: &str, _v: Option<&str>) -> Result<Value, String> {
+            if id == "sub" {
+                Ok(json!({
+                    "flow_id": "sub",
+                    "nodes": [
+                        {"type": "start", "id": "x", "next": "ev"},
+                        {"type": "event", "id": "ev", "event_type": "t", "next": "y"},
+                        {"type": "end", "id": "y", "resultType": "success"},
+                    ],
+                }))
+            } else {
+                Err(format!("no flow {id}"))
+            }
+        }
+    }
+    let flow = ir::load_with_flow_provider(&serde_json::to_vec(&flow_doc).unwrap(), &P).unwrap();
+    let err = flow.execute(&json!({"items": [1]}), &host).unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("loop-iteration") && text.contains("crossed"),
+        "named loop-boundary rejection expected, got: {text}"
+    );
+    assert_eq!(registry.registered.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        registry.unregistered.load(Ordering::SeqCst),
+        1,
+        "no orphan subscription"
+    );
+}
+
+#[test]
+fn loop_boundary_rejection_is_not_swallowed_by_error_handler() {
+    // 验证报告修正清单 #3：loop 节点自带 errorHandler continue 时，闸拒绝
+    // 必须仍以终态上抛（SuspendRejected 拦截臂）。
+    let doc = r#"{"flow_id":"f","nodes":[
+        {"type":"start","id":"s","next":"lp"},
+        {"type":"loop","id":"lp","collection":"$INPUT.items","next":"o","errorHandler":{"strategy":"continue"},"childFlow":{"nodes":[
+            {"type":"start","id":"a","next":"ev"},
+            {"type":"event","id":"ev","event_type":"t","next":"b"},
+            {"type":"end","id":"b","resultType":"success"}
+        ]}},
+        {"type":"end","id":"o","resultType":"success"}
+    ]}"#;
+    let flow = ir::load(doc.as_bytes()).unwrap();
+    let err = flow.execute(&json!({"items": [1]}), &host()).unwrap_err();
+    assert!(
+        err.to_string().contains("loop-iteration"),
+        "rejection must not be swallowed by errorHandler continue, got: {err}"
+    );
+}
+
+#[test]
+fn parallel_background_branch_is_statically_rejected() {
+    // 后台分支（不在 joinBranches）：派发前的静态闸同步具名拒。
+    let doc = r#"{"flow_id":"f","nodes":[
+        {"type":"start","id":"s","next":"p"},
+        {"type":"parallel","id":"p","branches":[
+            {"name":"bg","flow":{"nodes":[
+                {"type":"start","id":"bs","next":"be"},
+                {"type":"event","id":"be","event_type":"t","next":"bend"},
+                {"type":"end","id":"bend","resultType":"success"}
+            ]}}
+        ],"next":"o"},
+        {"type":"end","id":"o","resultType":"success"}
+    ]}"#;
+    let flow = ir::load(doc.as_bytes()).unwrap();
+    let err = flow.execute(&json!({}), &host()).unwrap_err();
+    assert!(
+        err.to_string().contains("contains a suspending node"),
+        "static rejection expected, got: {err}"
+    );
+}
+
+#[test]
+fn resume_during_cancel_is_refused() {
+    let doc = r#"{"flow_id":"f","nodes":[
+        {"type":"start","id":"s","next":"e1"},
+        {"type":"event","id":"e1","event_type":"t","next":"end"},
+        {"type":"end","id":"end","output":"$NODE.e1","resultType":"success"}
+    ]}"#;
+    let flow = ir::load(doc.as_bytes()).unwrap();
+    let host = host();
+    let suspended = suspend_of(flow.execute(&json!({}), &host));
+    host.cancel();
+    let err = suspended.resume(ResumeKind::Event, json!({})).unwrap_err();
+    assert!(
+        matches!(err, FlowError::Cancelled { .. }),
+        "cancel gate expected, got: {err}"
+    );
+}

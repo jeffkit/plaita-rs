@@ -169,21 +169,30 @@ approval 缺省 24h 订阅超时·显式 null=无限等待）。
 挂起节点位于 child/reference 调用链（任意深度）内部时，挂起穿透到根流程、恢复
 沿调用栈精确续跑。
 
-- **作用域闸**：`RuntimeCtx.FrameKind`（Root/ChildCall/ReferenceCall/
-  LoopIteration/ParallelBranch，构造期标注）+ `frame_chain_blocker()`——调用链
-  帧允许；任何迭代帧/分支帧上的挂起具名拒绝（`FlowError::SuspendRejected`
-  专属类型：parallel join 哨兵语义必须让它节点失败而不是吞成数据——哨兵会让
-  流程带着未消费的挂起继续走=fail-open）。迭代状态快照（剩余集合/累积结果）
-  是 v2 候选，独立评审。
+- **作用域闸（双层，验证报告修正后定案）**：`RuntimeCtx.FrameKind`
+  （Root/ChildCall/ReferenceCall/LoopIteration/ParallelBranch，构造期标注）。
+  **主闸 = 传播转换点的调用方帧 kind 检查**（execute_child/execute_reference
+  的 `suspension_carrier_or_reject`：迭代帧/分支帧边界具名拒绝**并注销已注册
+  订阅**——调用方 rc 永远真实，无 ambient 眼镜）；`frame_chain_blocker()`
+  降级为注册前 advisory 快路径（**reference 的 ambient 父链会遮蔽链行走**，
+  不能作为正确性保证——验证席实测坐实）。parallel 分支另有**派发前静态闸**
+  （`flow_contains_suspending`：分支图含挂起型节点即同步具名拒——后台分支的
+  动态拒绝无法同步上抛）。拒绝走 `FlowError::SuspendRejected` 专属类型：
+  execute_node 专属拦截臂保证不被 errorHandler continue 吞、不被 join 哨兵
+  吞。迭代状态快照（剩余集合/累积结果）是 v2 候选，独立评审。
 - **传播**：内层 `execute_on` 的 `Err(Suspended)` 经 child/reference 节点体转
   `NodeError::suspension` 载体上抛；`execute_node` 策略链先于预算归属/超时/
   重试/errorHandler 原样转发（与取消门同待遇）；每层 `advance_from` 把本帧
   （flow+rc+子节点 id）压入 `inner.call_stack`（压入序=传播序，最深父帧在前）。
 - **恢复**（`SuspendedExecution::resume` 续跑循环）：决策步（最内层 pending
-  节点，准入/状态翻转/订阅注销不变）→ 内层 flow 完成即「调用返回步」（父帧
-  `$NODE[child]`=返回值 + outputType 校验 + NodeEnd/FlowEnd + 每帧预算新鲜
-  发放 + 续跑 child.next）→ 直到根完成；续跑中再次挂起 = 新现场调用栈（更深，
-  在前）+ 剩余栈拼接，重入挂起态。
+  节点，准入/状态翻转/订阅注销不变；入口有取消门——cancel 后恢复被拒，载体
+  未消费）→ 逐帧走 `advance_and_finalize`（= execute_on 的收尾链抽取：内层
+  失败与首跑同链——FlowTimeout 终态/本帧 timeoutHandler/FlowEnd——不直抛
+  宿主，验证报告 Q8.1 修正）→ 内层完成即「调用返回步」（父帧 `$NODE[child]`=
+  返回值 + outputType 校验 + NodeEnd + 每帧预算新鲜发放 + 续跑 child.next）
+  → 直到根完成；续跑中再次挂起 = 新现场调用栈（更深，在前）+ 剩余栈拼接，
+  重入挂起态。**声明**：父帧子节点的 errorHandler/retry 不作用于恢复续跑
+  失败（该链只覆盖首次执行）；子节点 node.timeout 只覆盖首次执行。
 - **观测**：`checkpoint_json()` 附 `call_stack` 路径（flow_id/node_id 链）。
 - **测试**：suspend.rs 3 例改造（child 链真挂起+栈路径/loop 帧拒/parallel 帧
   拒）+ nested_suspend.rs 4 例（孙代双帧栈/reference 隔离保持/恢复中再挂起栈

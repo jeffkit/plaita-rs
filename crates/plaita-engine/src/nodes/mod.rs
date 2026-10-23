@@ -405,6 +405,73 @@ pub(crate) fn validate_output_pub(node: &Node, what: &str, value: &Value) -> Res
     validate_output(node, what, value)
 }
 
+/// 传播转换点的统一出口（验证报告 Q4/修正清单 #1/#2）：调用方帧 kind 是
+/// 真实帧（无 reference ambient 眼镜）——迭代帧/分支帧上的 carrier 在此具名
+/// 拒绝并**注销已注册的订阅**（防孤儿），`SuspendRejected` 一律映射为
+/// `NodeError::suspend_rejected`（绝不 stringify 成可重试 transient），
+/// 其余错误保持 transient 文本。
+pub(crate) fn suspension_carrier_or_reject(
+    e: FlowError,
+    caller_rc: &SharedCtx,
+) -> Result<Box<crate::exec::SuspendedExecution>, NodeError> {
+    match e {
+        FlowError::Suspended(inner) => {
+            if matches!(
+                caller_rc.frame_kind(),
+                FrameKind::LoopIteration | FrameKind::ParallelBranch
+            ) {
+                // 闸被 reference 的 ambient 链遮蔽时的兜底（loop→reference→…）：
+                // 订阅已在 suspend_flow 注册——注销后再具名拒绝。
+                if let Some(sub_id) = inner.subscription_id() {
+                    if !sub_id.is_empty() {
+                        if let Some(registry) = inner.host.subscription_registry() {
+                            let tenant = inner
+                                .node_state()
+                                .get("subscription_tenant")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(inner.host.tenant_id())
+                                .to_string();
+                            if let Err(err) = registry.unregister(&sub_id, &tenant) {
+                                eprintln!(
+                                    "[suspend] unregister subscription {sub_id:?} after                                      scope rejection: {err}"
+                                );
+                            }
+                        }
+                    }
+                }
+                return Err(NodeError::suspend_rejected(format!(
+                    "suspension carrier crossed a {:?} frame boundary: suspension v1 supports                      only child/reference call chains (subscription deregistered)",
+                    caller_rc.frame_kind().as_str()
+                )));
+            }
+            Ok(inner)
+        }
+        FlowError::SuspendRejected { message } => Err(NodeError::suspend_rejected(message)),
+        other => Err(NodeError::transient(other.to_string())),
+    }
+}
+
+/// 静态扫描：flow 图（含嵌套 childFlow/分支）里是否存在挂起型节点。
+/// parallel 分支在派发前做此检查——后台分支的动态闸拒绝是异步的，无法同步
+/// 上抛；v1 语义 = 分支图内不允许挂起型节点（确定性的同步具名拒绝）。
+pub(crate) fn flow_contains_suspending(flow: &Flow) -> bool {
+    flow.nodes.iter().any(|n| match &n.kind {
+        k if k.is_suspending() => true,
+        NodeKind::Child { child_flow, .. }
+        | NodeKind::Reference { child_flow, .. }
+        | NodeKind::Loop { child_flow, .. }
+        | NodeKind::Map { child_flow, .. }
+        | NodeKind::Filter { child_flow, .. }
+        | NodeKind::Find { child_flow, .. }
+        | NodeKind::Reduce { child_flow, .. }
+        | NodeKind::While { child_flow, .. } => flow_contains_suspending(child_flow),
+        NodeKind::Parallel { branches, .. } => branches
+            .iter()
+            .any(|b| b.flow.as_deref().is_some_and(flow_contains_suspending)),
+        _ => false,
+    })
+}
+
 /// 恢复「返回步」的子节点输出校验（execute_child/execute_reference 完成路径
 /// 的同款闸，供 exec::resume 的调用帧回填使用）。
 pub(crate) fn validate_child_return_output(node: &Node, value: &Value) -> Result<(), NodeError> {
@@ -670,9 +737,13 @@ fn run_collection_child(
         deadline,
         FrameKind::LoopIteration,
     );
-    child_flow
-        .execute_on(&child_rc, host, &input)
-        .map_err(|e| NodeError::transient(e.to_string()))
+    match child_flow.execute_on(&child_rc, host, &input) {
+        Ok(v) => Ok(v),
+        // 迭代帧边界：挂起 carrier/闸拒绝一律具名拒绝（修正清单 #2——stringify
+        // 会把它变成可重试 transient：重试 N 次 × N 条孤儿订阅 × 可被吞）。
+        Err(e) => suspension_carrier_or_reject(e, rc)
+            .map(|_| unreachable!("suspension carrier cannot escape a loop-iteration frame")),
+    }
 }
 
 /// loop 家族共享的输出尾（Go collectionExecuteResult 同形）：无显式 output →
@@ -1037,13 +1108,12 @@ fn execute_reference(
         RuntimeCtx::child_isolated(rc, input.clone(), &child_flow.id, child_flow, deadline);
     let result = match child_flow.execute_on(&child_rc, host, &input) {
         Ok(v) => v,
-        // 嵌套挂起穿透（v1）：reference 链同 child。
-        Err(FlowError::Suspended(inner)) => return Err(NodeError::suspension(inner)),
+        // 嵌套挂起穿透（v1）：reference 链同 child——且 reference 的 ambient
+        // 父链会遮蔽 frame_chain_blocker 的链行走，本转换点是 loop→reference
+        // 组合的**主闸**（调用方帧 kind 永远真实）。
         Err(e) => {
-            return Err(NodeError::transient(format!(
-                "failed to exec children workflow ({:?}) : {e}",
-                child_flow.id
-            )))
+            let inner = suspension_carrier_or_reject(e, rc)?;
+            return Err(NodeError::suspension(inner));
         }
     };
     validate_output(node, "reference output", &result)?;
@@ -1090,13 +1160,11 @@ fn execute_child(
     );
     let result = match child_flow.execute_on(&child_rc, host, &input) {
         Ok(v) => v,
-        // 嵌套挂起穿透（v1）：内层挂起原样上抛，不进任何策略链。
-        Err(FlowError::Suspended(inner)) => return Err(NodeError::suspension(inner)),
+        // 嵌套挂起穿透（v1）：内层挂起转 carrier 上抛（调用方帧是迭代/分支帧
+        // 时在此具名拒绝——修正清单 #1，转换点是主闸）；其余错误保持文本。
         Err(e) => {
-            return Err(NodeError::transient(format!(
-                "failed to exec children workflow ({:?}) : {e}",
-                child_flow.id
-            )))
+            let inner = suspension_carrier_or_reject(e, rc)?;
+            return Err(NodeError::suspension(inner));
         }
     };
     validate_output(node, "child output", &result)?;
@@ -1211,6 +1279,9 @@ fn execute_parallel(
     host: &Host,
     deadline: Option<Instant>,
 ) -> Result<StepOutcome, NodeError> {
+    // 静态闸（修正清单 #4）：分支图含挂起型节点 = 同步具名拒绝（join 与
+    // background 一视同仁——后台分支的动态拒绝无法同步上抛）。
+    reject_suspending_branches(node, branches)?;
     let matched: Vec<&crate::model::ParallelBranchDef> = if !is_conditional {
         branches.iter().collect()
     } else {
@@ -1411,4 +1482,24 @@ fn run_branch_flow(
         Err(FlowError::SuspendRejected { message }) => Err(NodeError::suspend_rejected(message)),
         Err(e) => Err(NodeError::transient(e.to_string())),
     }
+}
+
+/// parallel 分支派发前的静态闸（修正清单 #4）：分支图内含挂起型节点 = v1
+/// 不支持，同步具名拒绝——后台分支的动态拒绝是异步的，无法上抛。
+fn reject_suspending_branches(
+    node: &Node,
+    branches: &[crate::model::ParallelBranchDef],
+) -> Result<(), NodeError> {
+    for b in branches {
+        if let Some(flow) = &b.flow {
+            if flow_contains_suspending(flow) {
+                return Err(NodeError::suspend_rejected(format!(
+                    "parallel node {:?} branch {:?} contains a suspending node: suspension v1 \
+                     does not support parallel frames (see docs/PROGRAM.md)",
+                    node.id, b.branch.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
