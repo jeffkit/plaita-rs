@@ -1,0 +1,88 @@
+{
+  "name": "loop_child_bypass_named_rejection",
+  "doc": "loop→child 旁路具名拒：loop 体先 child 再在 child 内挂起——传播转换点（主闸）具名拒绝，阻断帧点名 loop。",
+  "source": "rs 验证报告 Q4 遮蔽组合的 child 版（转换点闸）/ plaita TestScopeGate::test_loop_via_child_suspension_named_rejection（go 同语义面）",
+  "flow": {
+    "flow_id": "loop_via_child",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {
+        "type": "start",
+        "id": "s",
+        "next": "lp"
+      },
+      {
+        "type": "loop",
+        "id": "lp",
+        "collection": "$INPUT.items",
+        "next": "o",
+        "childFlow": {
+          "flow_id": "loop-mid",
+          "version": "1",
+          "runtime": "python",
+          "nodes": [
+            {
+              "type": "start",
+              "id": "m",
+              "next": "c"
+            },
+            {
+              "type": "child",
+              "id": "c",
+              "next": "mend",
+              "childFlow": {
+                "flow_id": "mid-child",
+                "version": "1",
+                "runtime": "python",
+                "nodes": [
+                  {
+                    "type": "start",
+                    "id": "a",
+                    "next": "ev"
+                  },
+                  {
+                    "type": "event",
+                    "id": "ev",
+                    "event_type": "t",
+                    "next": "b"
+                  },
+                  {
+                    "type": "end",
+                    "id": "b",
+                    "resultType": "success"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "end",
+              "id": "mend",
+              "output": "mid-done",
+              "resultType": "success"
+            }
+          ]
+        }
+      },
+      {
+        "type": "end",
+        "id": "o",
+        "output": "done",
+        "resultType": "success"
+      }
+    ]
+  },
+  "flows": {},
+  "input": {
+    "items": [
+      1
+    ]
+  },
+  "resume": [],
+  "suspend_node": null,
+  "expected": {
+    "outcome": "rejected",
+    "reject_reason": "loop_frame",
+    "suspended_nodes": []
+  }
+}

@@ -1,6 +1,6 @@
 # plaita-rs — build / test / differential gates (mirror of plaita-go's shape)
 
-.PHONY: build test clippy fmt go-ref build-cli diffcheck node-parity ci
+.PHONY: build test clippy fmt go-ref build-cli diffcheck node-parity ns-m4 ci
 
 build:
 	cargo build --workspace
@@ -29,6 +29,13 @@ build-cli:
 # Differential acceptance: both engines must agree on every case
 diffcheck: build-cli go-ref
 	python3 tools/diffcheck.py
+
+# NS-M4 nested-suspend three-engine differential gate (程式一收官):
+# rs + go + plaita over tools/nested_suspend_diff/cases. A missing leg
+# (no plaita checkout/venv, no go toolchain) is auto-SKIPed with a note —
+# the gate compares whatever legs are available (>=2 to be meaningful).
+ns-m4: build-cli
+	python3 tools/nested_suspend_diff/diffcheck.py
 
 # Python↔Rust node-type parity gate (#80 alignment): extract the authoritative
 # list from the sibling plaita + plaita-nodes checkouts, then run the

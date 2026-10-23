@@ -1,0 +1,46 @@
+{
+  "name": "resuspension_merges_call_stacks",
+  "doc": "恢复中再挂起栈合并：root→c1→[evA→c2→evB]；第一次恢复后内层续跑到 evB 再挂起（新现场在前、剩余栈在后），第二次恢复一路返回步到根。",
+  "source": "rs nested_suspend::resume_continuation_re_suspension_merges_call_stacks / go TestNestedSuspendReSuspensionMergesCallStacks / plaita TestReSuspension::test_resume_then_resuspend_merges_stack",
+  "flow": {
+    "flow_id": "root",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {"type": "start", "id": "s", "next": "c1"},
+      {"type": "child", "id": "c1", "next": "o", "childFlow": {
+        "flow_id": "c1.childFlow",
+        "version": "1",
+        "runtime": "python",
+        "nodes": [
+          {"type": "start", "id": "a", "next": "evA"},
+          {"type": "event", "id": "evA", "event_type": "first", "next": "c2"},
+          {"type": "child", "id": "c2", "next": "aend", "childFlow": {
+            "flow_id": "c2.childFlow",
+            "version": "1",
+            "runtime": "python",
+            "nodes": [
+              {"type": "start", "id": "b", "next": "evB"},
+              {"type": "event", "id": "evB", "event_type": "second", "next": "bend"},
+              {"type": "end", "id": "bend", "output": "done", "resultType": "success"}
+            ]
+          }},
+          {"type": "end", "id": "aend", "output": "$NODE.c2", "resultType": "success"}
+        ]
+      }},
+      {"type": "end", "id": "o", "output": "$NODE.c1", "resultType": "success"}
+    ]
+  },
+  "flows": {},
+  "input": {},
+  "resume": [
+    {"type": "event", "data": {"event_type": "first"}},
+    {"type": "event", "data": {"event_type": "second"}}
+  ],
+  "suspend_node": "evA",
+  "expected": {
+    "outcome": "completed",
+    "suspended_nodes": ["evA", "evB"],
+    "output": "done"
+  }
+}

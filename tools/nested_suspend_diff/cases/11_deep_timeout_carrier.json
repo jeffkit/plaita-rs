@@ -1,0 +1,35 @@
+{
+  "name": "deep_timeout_carrier",
+  "doc": "timeout 载体深位：child 链内挂起后投 timeout 载体——内层节点状态翻 timeout，child 续跑到 end、返回步回传父帧到根完成。",
+  "source": "rs nested_suspend::deep_binding_enforcement_and_timeout_at_depth（timeout 臂）/ go TestNestedSuspendDeepBindingAndTimeoutAtDepth（timeout 臂）/ plaita 深位 timeout 语义同 resume 通道",
+  "flow": {
+    "flow_id": "root",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {"type": "start", "id": "s", "next": "c"},
+      {"type": "child", "id": "c", "next": "o", "childFlow": {
+        "flow_id": "child1",
+        "version": "1",
+        "runtime": "python",
+        "nodes": [
+          {"type": "start", "id": "a", "next": "ev"},
+          {"type": "event", "id": "ev", "event_type": "t", "next": "b"},
+          {"type": "end", "id": "b", "output": {"status": "$NODE.ev.status"}, "resultType": "success"}
+        ]
+      }},
+      {"type": "end", "id": "o", "output": "$NODE.c", "resultType": "success"}
+    ]
+  },
+  "flows": {},
+  "input": {},
+  "resume": [
+    {"type": "timeout", "data": {"event_type": "t"}}
+  ],
+  "suspend_node": "ev",
+  "expected": {
+    "outcome": "completed",
+    "suspended_nodes": ["ev"],
+    "output": {"status": "timeout"}
+  }
+}

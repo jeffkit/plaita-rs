@@ -1,0 +1,92 @@
+{
+  "name": "loop_reference_bypass_named_rejection",
+  "doc": "loop→reference 旁路具名拒：reference 的 ambient 父链遮蔽 advisory 闸，订阅注册后由传播转换点具名拒绝（rs/go 注册后注销=无孤儿；plaita 转换点先于注册=结构性无孤儿）——对拍面只比拒绝类别。",
+  "source": "rs nested_suspend::loop_reference_bypass_is_named_rejected_without_orphan_subscription / go TestNestedSuspendLoopReferenceBypassNoOrphan",
+  "flow": {
+    "flow_id": "loop_ref_root",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {
+        "type": "start",
+        "id": "s",
+        "next": "lp"
+      },
+      {
+        "type": "loop",
+        "id": "lp",
+        "collection": "$INPUT.items",
+        "next": "o",
+        "childFlow": {
+          "flow_id": "loop-body",
+          "version": "1",
+          "runtime": "python",
+          "nodes": [
+            {
+              "type": "start",
+              "id": "a",
+              "next": "r"
+            },
+            {
+              "type": "reference",
+              "id": "r",
+              "flowID": "sub",
+              "next": "b"
+            },
+            {
+              "type": "end",
+              "id": "b",
+              "resultType": "success"
+            }
+          ]
+        }
+      },
+      {
+        "type": "end",
+        "id": "o",
+        "output": "done",
+        "resultType": "success"
+      }
+    ]
+  },
+  "flows": {
+    "sub": {
+      "flow_id": "sub",
+      "version": "1",
+      "runtime": "python",
+      "inputType": {
+        "dataType": "any"
+      },
+      "nodes": [
+        {
+          "type": "start",
+          "id": "x",
+          "next": "ev"
+        },
+        {
+          "type": "event",
+          "id": "ev",
+          "event_type": "t",
+          "next": "y"
+        },
+        {
+          "type": "end",
+          "id": "y",
+          "resultType": "success"
+        }
+      ]
+    }
+  },
+  "input": {
+    "items": [
+      1
+    ]
+  },
+  "resume": [],
+  "suspend_node": null,
+  "expected": {
+    "outcome": "rejected",
+    "reject_reason": "loop_frame",
+    "suspended_nodes": []
+  }
+}

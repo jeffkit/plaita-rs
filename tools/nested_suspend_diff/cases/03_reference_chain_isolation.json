@@ -1,0 +1,38 @@
+{
+  "name": "reference_chain_isolation",
+  "doc": "reference 链隔离：reference 帧（隔离上下文）内 event 挂起穿透到根，恢复后隔离保持——$INPUT 是注入的 {n}，$PARENT.n 不可见（null）。",
+  "source": "rs nested_suspend::reference_chain_isolation_preserved_through_suspension / go TestNestedSuspendReferenceChainIsolation / plaita TestDeepChains::test_reference_chain_isolation_and_suspend",
+  "flow": {
+    "flow_id": "rootf",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {"type": "start", "id": "s", "next": "r"},
+      {"type": "reference", "id": "r", "flowID": "sub", "input": {"n": "$INPUT.name"}, "next": "o"},
+      {"type": "end", "id": "o", "output": "$NODE.r", "resultType": "success"}
+    ]
+  },
+  "flows": {
+    "sub": {
+      "flow_id": "sub",
+      "version": "1",
+      "runtime": "python",
+      "inputType": {"dataType": "any"},
+      "nodes": [
+        {"type": "start", "id": "a", "next": "ev"},
+        {"type": "event", "id": "ev", "event_type": "sub-event", "next": "b"},
+        {"type": "end", "id": "b", "output": {"got": "$INPUT", "parent_leak": "$PARENT.n"}, "resultType": "success"}
+      ]
+    }
+  },
+  "input": {"name": "kong"},
+  "resume": [
+    {"type": "event", "data": {"event_type": "sub-event", "x": 1}}
+  ],
+  "suspend_node": "ev",
+  "expected": {
+    "outcome": "completed",
+    "suspended_nodes": ["ev"],
+    "output": {"got": {"n": "kong"}, "parent_leak": null}
+  }
+}

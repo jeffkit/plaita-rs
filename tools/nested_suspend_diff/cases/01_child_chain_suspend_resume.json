@@ -1,0 +1,35 @@
+{
+  "name": "child_chain_suspend_resume",
+  "doc": "child 链挂起+恢复到根：root→child→event 挂起（单帧调用栈），事件恢复后 child 续跑到 end、返回值回填父帧、根流程完成。",
+  "source": "rs nested_suspend::deep_binding_enforcement*（单层版）/ go TestNestedSuspendChildChainParksAndResumes / plaita TestNestedSuspendProbeScenario::test_event_resume_walks_path_to_root_end",
+  "flow": {
+    "flow_id": "root",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {"type": "start", "id": "s", "next": "c"},
+      {"type": "child", "id": "c", "next": "o", "childFlow": {
+        "flow_id": "child1",
+        "version": "1",
+        "runtime": "python",
+        "nodes": [
+          {"type": "start", "id": "a", "next": "ev"},
+          {"type": "event", "id": "ev", "event_type": "approval", "next": "bend"},
+          {"type": "end", "id": "bend", "output": {"status": "$NODE.ev.status", "answer": "$NODE.ev.event_data.answer"}, "resultType": "success"}
+        ]
+      }},
+      {"type": "end", "id": "o", "output": "$NODE.c", "resultType": "success"}
+    ]
+  },
+  "flows": {},
+  "input": {},
+  "resume": [
+    {"type": "event", "data": {"event_type": "approval", "answer": "ok"}}
+  ],
+  "suspend_node": "ev",
+  "expected": {
+    "outcome": "completed",
+    "suspended_nodes": ["ev"],
+    "output": {"status": "completed", "answer": "ok"}
+  }
+}
