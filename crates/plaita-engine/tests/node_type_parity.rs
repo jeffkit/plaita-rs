@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use plaita_engine::ir::{capability_manifest, SUPPORTED_NODE_TYPES};
+use plaita_engine::ir::{capability_manifest, CONTRACT_VERSION, SUPPORTED_NODE_TYPES};
 
 /// Python 有、本引擎不实现的类型——「不能补的明确列为例外」清单。补齐任一
 /// 类型后必须摘条，摘条动作本身由过期红守着。
@@ -141,9 +141,39 @@ fn capability_manifest_internal_consistency() {
         );
     }
     assert_eq!(m["engine"], "plaita-rs");
-    assert!(m["contract_version"].is_string());
+    assert_eq!(m["ir_contract_version"], CONTRACT_VERSION);
     // supported 必有白名单、unsupported 必有 hint（白名单即 manifest 的源）。
     for t in SUPPORTED_NODE_TYPES {
         assert!(supported.contains(t));
     }
+}
+
+/// JSON 形状对拍 plaita-go `pkg/ir` TestCapabilityManifestJSONShape（a20da36）：
+/// 六键全集、ir_contract_version 与常量一致、三列表、node_dependencies 对象。
+/// 键名必须逐字对齐 console MANIFEST_KEYS——`contract_version` 旧键名会被
+/// manifest_from_metadata 判「无清单」走 fail-open（B4 第十二轮负控钉死）。
+#[test]
+fn capability_manifest_json_shape_matches_go() {
+    let m = capability_manifest();
+    assert_eq!(m["engine"], "plaita-rs");
+    assert_eq!(m["ir_contract_version"], CONTRACT_VERSION);
+    for key in ["supported_node_types", "unsupported_node_types", "features"] {
+        assert!(m[key].is_array(), "{key} must be an array");
+    }
+    assert_eq!(m["features"].as_array().unwrap().len(), 0);
+    assert!(m["node_dependencies"].is_object());
+    let mut keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "engine",
+            "features",
+            "ir_contract_version",
+            "node_dependencies",
+            "supported_node_types",
+            "unsupported_node_types",
+        ]
+    );
+    assert!(!m.as_object().unwrap().contains_key("contract_version"));
 }
