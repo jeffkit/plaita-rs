@@ -30,6 +30,7 @@ crates/
     src/ir/            部署 JSON 装载——normalize（别名折叠/超时→ISO8601/metadata 暂存）
                        + validate（R1 唯一 start+可达 / R3 next 引用 / R2 嵌入流程达 end /
                        R4 joinBranches⊆分支名 / R5 $NODE 引用 / R6 $F 注册表 / R7 output 字面量）+ 拒载清单
+                       + flow_hash（内嵌 definitionHash 装载前校验门，plaita#60 语义）
     src/context.rs     运行时上下文：$INPUT/$NODE/$PARENT/$GLOBAL/$ENV/$ERROR/$BRANCH/$FLOW_ID/
                        $LAST_NODE/$EXECUTION_ID + current（LOOP-ITEM 等）；RwLock + 快照（并行分支并发读）
     src/exec.rs        执行循环：flow/node 两级 retry（flow 固定 10ms / node 指数 1s·2^n cap 30s）、
@@ -73,7 +74,14 @@ tools/
 7. **Python 权威三对齐（B4 r7，规格以 plaita Python 引擎为准）**：
    ①无 timeout 的 flow 补执行级缺省预算 1800s（`PLAITA_EXECUTION_DEADLINE_SECONDS`
    可调、非法值回默认并告警；Python `deadline.py`/`strategies.py:144`；Go 依赖 worker 层
-   deadline，本引擎自带）；②**无流级 errorHandler**——顶层该键=未知键 warning+忽略，
+   deadline，本引擎自带）。**owner 拍板（2026-10-23）：缺省 1800s 只填根流缺省位
+   （`Flow::execute`）；子流预算=父 remaining 与子 timeout 取严（min 合成，
+   `RuntimeCtx::child`/`child_isolated`）——父 remaining 传播为规格，Rust=规格侧；
+   r8 实读的 Python「子执行新鲜独立预算、父 remaining 不穿透」降为已知分歧，
+   Python 对齐另议未派（涉及生产流行为变更，主控转 owner 后续）**。负控三格
+   （先红后绿）：父短子长（父 PT2S/子 PT10S→预算 2s，flows.rs）、根流缺省 1800s
+   （budget.rs）、显式 timeout 优先压过 env（execution_budget_env.rs）。
+   ②**无流级 errorHandler**——顶层该键=未知键 warning+忽略，
    流恒单次执行，Go 的整流重投 ×(1+n) 不实现（Python Flow 模型无该字段）；③parallel
    分支并发上限=Python 后台池口径（默认 8、同名 env 可调、嵌套池内降级串行内联；
    Go 分支 goroutine 无上限）。
@@ -199,6 +207,47 @@ approval 缺省 24h 订阅超时·显式 null=无限等待）。
   合并/深位绑定准入与 timeout 载体）。
 - **go/plaita 跟进**：plaita-go#88（NS-M2）、plaita#311（NS-M3，顺带修
   fail-open）；规格即本文档+docs/PROGRAM.md。
+## 流程定义指纹门（B4 r11，2026-10-23，全量入位第一步）
+
+**为什么**：混编舰队入位的第一道门——引擎在装载前就能判定「这份定义是否
+还是发布者指纹的那份」，mismatch 具名终态可判（镜像 plaita-go worker resume
+硬门与 Python `classify_flow_hash_change` 的 mismatch 语义），不静默放行。
+manifest 位次（r12 前瞻）/outbox 读穿透（r13 前瞻）后续接。
+
+**算法权威** = plaita `plaita/server/flow_worker.py`
+`canonical_flow_definition_json` + `compute_flow_definition_hash`：
+`json.dumps(sort_keys=True, ensure_ascii=False, separators=(",",":"))` 过
+**json.loads 解析后的存储原始定义**（model_validate 之前）→ sha256 hex。
+Go 参照复刻 = plaita-go `pkg/worker/canonicaljson.go`（`a20da36`）。
+本仓实现 `ir/flow_hash.rs`：自带**字面量保持**的严格 JSON 扫描器（serde
+会把数值落 f64 重渲染——`1e2`→Python `100.0`、>u64 大整数丢精度，逐项翻
+指纹），渲染按 Python 规则重放（整数逐字透传 `-0`→`0`；浮点 float.__repr__
+口径：最短 round-trip、小数点位 ∈ (-4,16] 定点否则指数 ≥2 位、整数值 `.0`
+尾、`1e400`→`Infinity`、`1e-400`→`0.0`）；ESCAPE_DCT-only 字符串转义
+（DEL/U+2028 原样）；重复键 last-wins；孤立代理逃逸具名拒（G-1 同域）。
+
+**内嵌门契约**：定义可携带顶层保留键 `definitionHash`（+可选 `hashAlgo`）。
+`ir::load`/`load_with_flow_provider` 在 **normalize 之前**（指纹域=存储原始
+定义）校验：无 `definitionHash` = 跳过（向后兼容旧定义，Python `no_guard`
+同语义）；`hashAlgo` 在场非本引擎算法（`flow-definition-json-sortkeys-v2-rust`
+——Go 尾 `-go`、Python 无尾，同命名法）= 具名拒（拒绝跨算法比摘要，防
+v1 老口径读成假 mismatch）；不匹配 = `flow_hash_mismatch` 具名拒（消息载
+stored/current 双摘要 + re-publish 指引）。指纹计算域 = **剥去保留键后**的
+文档（保留键是运载元数据非「作者语义」）；校验通过后两键剥离，不进
+normalize/引擎管道。`allow_flow_hash_change` 逃生口属 worker 层（Python/Go），
+引擎装载门不给 override。`FlowProvider` 解析出的子流程文档不过门（本轮
+契约只覆盖顶层装载文档）。
+
+**验收（先红后绿）**：①golden 62 案逐案对拍 Python 权威（fixture
+`crates/plaita-engine/testdata/flow_hash_golden.json` 自 plaita-go
+`pkg/worker/testdata/` 逐字复用——该 fixture 由 plaita-go
+`scripts/export_flow_hash_golden.py` 从 plaita Python 真跑导出，禁止手改；
+再导出命令见该脚本头注）：canonical 字节等 + hash 等 + `go_rejects`/深度/
+孤立代理案具名拒，矩阵守卫 a1_*≥10/可 hash 案≥50——**门接线前已绿**
+（编码器独立对拍成立）；②门四格：匹配装载/篡改具名拒（`flow_hash_mismatch`
++双摘要）/无 hash 兼容/未知算法具名拒，接线前红、接线后绿；③规范化不敏感
+面：键序+空白不同语义相同的文档同指纹、跨布局嵌入 hash 可装载。守恒：
+cargo test 166P（基线 153+13）/diffcheck 23/23/fmt/clippy 干净。
 
 ## 审计记录（2026-10-21，四路子智能体对抗审计）
 
@@ -215,7 +264,7 @@ approval 缺省 24h 订阅超时·显式 null=无限等待）。
 - P2 群：`_`/dunder 属性闸覆盖非映射基底、`$NULL/$EMPTYSTRING` 后继路径、`\`+换行拒绝、`%g` 负指数、零转换符多余实参报错、sidecar 真进程组杀（process_group(0)+kill -9 -PID）；
 - ir 审计 6 单：end resultType 类型漏拒 / `$F` 扫描 lookbehind+`\s` / globalContext 显式 context 胜出 / http addressing·delegate fail-closed / unknownFields 落 metadata / retryTimes 严格化 + Property 双拼写残留清理 + trpc/mdb 族 hint + version 长度检查。
 
-**文档化残余（有意/存档，不算 bug）**：无全图环保护——switch 自环合法装载，防死循环=配 flow timeout，缺省另有 1800s 执行预算兜底（B4 r7，不再无限自旋）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试已整体撤出（B4 r7 对齐 Python 单次执行——先前「每轮重建上下文」的分歧面随之消失）；子流预算沿父 remaining（min 合成）vs Python「子执行新鲜独立预算（缺省 1800s，父 remaining 不穿透，B4 r8 实读更正 r7 台账注记）」——形状分歧 P3 待裁决；`$ERROR` 根与 `maxRedirects` 静默忽略两枚 Go 残面已盘点入台账（B4 r8）待裁决。
+**文档化残余（有意/存档，不算 bug）**：无全图环保护——switch 自环合法装载，防死循环=配 flow timeout，缺省另有 1800s 执行预算兜底（B4 r7，不再无限自旋）；大整数域 >i64 回落 f64/报 OverflowError；None→零值桥镜像 Go（与 Python TypeError 面不同，crate 头已声明）；`join` 不收 str 可迭代、`json_loads` 不收 NaN/Infinity、`%b` 超集、`isDigit` 用 is_numeric（比 Python isdigit 宽）、`keys()/items()` 物化 list、strftime `%z/%Z` 空串（naive 语义，已对齐 Python）；流级重试已整体撤出（B4 r7 对齐 Python 单次执行——先前「每轮重建上下文」的分歧面随之消失）；子流预算沿父 remaining（min 合成）——**不再是分歧，owner 拍板规格（2026-10-23）：父 remaining 传播为规格、Rust=规格侧；Python「子执行新鲜独立预算（缺省 1800s，父 remaining 不穿透，B4 r8 实读更正 r7 台账注记）」为已知分歧，Python 对齐另议未派**；`$ERROR` 根与 `maxRedirects` 静默忽略两枚 Go 残面已盘点入台账（B4 r8）待裁决。
 
 ## 运行期字符串契约：配置求值、运行期数据（2026-10-21，jeffkit 终裁）
 
@@ -262,7 +311,10 @@ cargo clippy --all-targets                   # 应保持零告警
   测试导出的逐字副本，禁止手改；Python 侧语义升级后用 plaita-go 的
   `scripts/export_golden.py` 重新导出并同步到本仓。
 - **testdata 纪律**：`crates/plaita-engine/testdata/*.json` 来自 plaita-go `pkg/ir/testdata/`
-  （真实 console 导出 + codeflow 编译产物），同样禁止手改。
+  （真实 console 导出 + codeflow 编译产物），同样禁止手改；例外：
+  `flow_hash_golden.json` 来自 plaita-go `pkg/worker/testdata/`（#60 指纹
+  golden，由 plaita-go `scripts/export_flow_hash_golden.py` 从 plaita Python
+  真跑导出——Python 才是算法权威，Go 侧是同源 fixture），同样禁止手改。
 
 ## 环境备注（本机）
 

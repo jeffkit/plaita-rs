@@ -429,6 +429,42 @@ fn child_timeout_escapes_are_capped_by_parent_budget() {
     );
 }
 
+/// 子流预算 = 父 remaining 与子 timeout 取严（owner 拍板规格 2026-10-23：
+/// 父 remaining 传播为规格，Rust=规格侧；B4 r11 负控「父短子长格」——
+/// 父 PT2S / 子 PT10S）。子体睡 4s：合成正确时父 remaining（~2s）先到，
+/// FlowTimeout 终态；若传播被破坏（子流拿新鲜独立预算或 own-wins），子会在
+/// ~4s 正常跑完并成功——「成功即负控红灯」+ ~2s 时限双断言钉住。
+#[test]
+fn subflow_budget_is_parent_remaining_when_parent_shorter() {
+    let data = r#"{
+        "flow_id": "parent-short",
+        "timeout": "PT2S",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "c"},
+            {"type": "child", "id": "c", "next": "e",
+             "childFlow": {
+                "flow_id": "child-long",
+                "timeout": "PT10S",
+                "nodes": [
+                    {"type": "start", "id": "start", "next": "k"},
+                    {"type": "code", "id": "k", "language": "python", "next": "e2",
+                     "code": "import time\ndef run(input):\n    time.sleep(4)\n    return 1",
+                     "input": {}},
+                    {"type": "end", "id": "e2", "resultType": "success", "output": "$NODE.k"}
+                ]}},
+            {"type": "end", "id": "e", "resultType": "success", "output": "done"}
+        ]}"#;
+    let flow = ir::load(data.as_bytes()).unwrap();
+    let t0 = std::time::Instant::now();
+    let err = flow.execute(&json!({}), &Host::new()).unwrap_err();
+    let elapsed = t0.elapsed();
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(3500),
+        "parent remaining (2s) must bound the subflow, got {elapsed:?}"
+    );
+}
+
 /// code 节点的超时必须能被节点 timeoutHandler 接住（审计 [中]：先前
 /// blanket deterministic 抹掉 Timeout 类，continue/continue-with 失效）。
 #[test]
