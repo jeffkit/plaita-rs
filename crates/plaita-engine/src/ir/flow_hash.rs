@@ -491,6 +491,33 @@ pub fn flow_definition_hash(raw: &[u8]) -> Result<String, String> {
     Ok(sha256_hex(canonical_definition_json(raw)?.as_bytes()))
 }
 
+/// console 读穿透的引擎载荷（#299 §2 `engineFlowPayload` 的 Rust 对应）：
+/// console 存储的定义原文（`flow_versions.definition`，不含 flow_id/version
+/// ——那是列不是文档字段）注入身份两键后，按 Python canonical 口径渲染。
+/// 走本文件的扫描器（数值字面量原文保真），不用 serde——serde 的 f64 重渲染
+/// 会翻指纹（模块头注记）；产物字节即 canonical 形式，注入后喂
+/// [`crate::ir::load`] 时内嵌指纹门（计算域 = 剥保留键后的文档）按 console
+/// 发布时登记的 `definitionHash` 执法——outbox 的 definition_hash 正是按
+/// 注入后载荷计的。
+///
+/// 与 Go 参照实现同口径：根非对象 = 错（json.Decode into map 拒标量/数组）；
+/// 文档内已有 flow_id/version 时注入值胜（Go map 赋值覆盖语义）。
+pub fn engine_flow_payload(
+    flow_id: &str,
+    version: &str,
+    definition: &[u8],
+) -> Result<String, String> {
+    let doc = scan(definition)?;
+    let mut kvs = match doc {
+        CVal::Obj(kvs) => kvs,
+        _ => return Err("ir: flow hash: flow definition must be a JSON object".to_string()),
+    };
+    kvs.retain(|(k, _)| k != "flow_id" && k != "version");
+    kvs.push(("flow_id".to_string(), CVal::Str(flow_id.to_string())));
+    kvs.push(("version".to_string(), CVal::Str(version.to_string())));
+    Ok(canonical_text(&CVal::Obj(kvs)))
+}
+
 /// 剥去顶层保留键后的指纹（内嵌门的计算域）。
 fn hash_excluding_reserved(raw: &[u8]) -> Result<String, String> {
     let doc = scan(raw)?;

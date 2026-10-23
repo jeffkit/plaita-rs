@@ -21,8 +21,8 @@ mod support;
 mod validate;
 
 pub use flow_hash::{
-    canonical_definition_json, flow_definition_hash, verify_definition_hash, FLOW_HASH_ALGO,
-    HASH_ALGO_FIELD, HASH_FIELD,
+    canonical_definition_json, engine_flow_payload, flow_definition_hash, verify_definition_hash,
+    FLOW_HASH_ALGO, HASH_ALGO_FIELD, HASH_FIELD,
 };
 
 pub use normalize::{KNOWN_UNSUPPORTED, SUPPORTED_NODE_TYPES};

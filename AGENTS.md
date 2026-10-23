@@ -212,7 +212,8 @@ approval 缺省 24h 订阅超时·显式 null=无限等待）。
 **为什么**：混编舰队入位的第一道门——引擎在装载前就能判定「这份定义是否
 还是发布者指纹的那份」，mismatch 具名终态可判（镜像 plaita-go worker resume
 硬门与 Python `classify_flow_hash_change` 的 mismatch 语义），不静默放行。
-manifest 位次（r12 前瞻）/outbox 读穿透（r13 前瞻）后续接。
+manifest 位次已接（r12，`8fbce14`）；outbox 读穿透已接（r13，见下节——
+回源定义过本门，`flow_hash_mismatch` 在回源路径执法）。
 
 **算法权威** = plaita `plaita/server/flow_worker.py`
 `canonical_flow_definition_json` + `compute_flow_definition_hash`：
@@ -248,6 +249,53 @@ normalize/引擎管道。`allow_flow_hash_change` 逃生口属 worker 层（Pyth
 +双摘要）/无 hash 兼容/未知算法具名拒，接线前红、接线后绿；③规范化不敏感
 面：键序+空白不同语义相同的文档同指纹、跨布局嵌入 hash 可装载。守恒：
 cargo test 166P（基线 153+13）/diffcheck 23/23/fmt/clippy 干净。
+
+## 定义装载 console 读穿透（B4 第十三轮，2026-10-23，全量入位第三步）
+
+**为什么**：跨 Redis 部署（console 与 worker 不同 Redis）存在 outbox 投递
+窗口——console durable publish（plaita 2f1be94）把定义送到目标 Redis 之前，
+engine storage 里没有 `{ns}:flow:{fid}:{ver}` 键，装载方只能 not-found。
+`flowsource.rs` 让定义装载在本地 miss 时回源 console 管理面（#299 §2，
+plaita-go `pkg/worker/flowsource.go` + `console_flowsource.go` 的引擎侧对应
+形态）。**本轮落点 = 定义装载入口层**（嵌入式宿主经引擎装载定义的场景）；
+Redis 存储腿与消费循环集成等 worker crate 落地后接线（worker 规格
+flowsource.rs 位，与 registry 同批次）。
+
+**回源链**：本地（`LocalFlowStore`，内置 `MemoryFlowStore`）miss → 配置了
+`PLAITA_CONSOLE_FLOW_SOURCE_URL` 才回源（未配置 = 特性关闭，miss 即确定性
+NotFound，与现状逐字节同）→ `GET /api/flows/{fid}/versions/{ver}`
+（`X-Admin-API-Key` + `X-Tenant-ID`；空/缺省租户按具名缺省拼写）→
+**引擎载荷注入**（`ir::engine_flow_payload`：console 存储原文注入
+flow_id/version 后按 #60 canonical 口径渲染，字面量保持扫描器保真——serde
+f64 重渲染会翻指纹）→ `ir::load`（**r11 hash 门在同路径天然执法**：
+`definitionHash` mismatch 即 `flow_hash_mismatch` 具名拒）。
+
+**错误语义（本特性的安全核心）**：console 404/无 published/未发布 →
+`FlowSourceError::NotFound`（确定性，进负缓存，重投不可能成功）；网络错/
+超时/5xx/其余 4xx → `FlowSourceError::Transient`——**绝不可达伪造成不
+存在**（那会把在途执行终态化），不进负缓存（定义可能下一刻就经 outbox
+到达）；unparsable/装载拒（含 hash 门）→ `NotFound`+负缓存（该引擎构建下
+永久失败，不烧重试预算）。负缓存窗 30s（env 可调）；瞬态重试 attempts=2、
+250ms 固定退避；单响应读帽 64MB。**回写默认关**
+（`PLAITA_CONSOLE_FLOW_SOURCE_WRITEBACK=1` 显式开）——默认保持 #303
+「删除后目标侧不复活」的清除语义只读。latest 哨兵：console 侧解析为最新
+published（published_at 缺则 created_at，version 串决胜）。
+
+**验收（先红后绿）**：红=编译级（`flowsource` 模块与 `engine_flow_payload`
+基线无接受面，E0432）+ 变异红（Unavailable 误映射 NotFound 当场被格3
+抓住）；绿=负控 15 件（任务书五格：miss→回源→hash 门→装载成功 /
+404→具名负缓存〔窗过期回源实证〕/ 不可达→瞬态不伪造 404 / 本地命中零
+console 调用 / 未配置=特性关闭 + 另钉：瞬态重试后成功、attempts 耗尽仍
+瞬态、latest 解析 draft 跳过、draft 拒载、hash 门 mismatch 执法、
+unparsable 确定性拒、租户头透传与缺省映射、engine_payload 注入口径〔大
+整数字面量保真〕、回写默认关、本地 not-loadable 确定性）。守恒：cargo
+test 197P（基线 177+20）/diffcheck 23/23/fmt/clippy 干净；
+`--no-default-features` 构建绿（配置了 URL 却无 http 特性 = 具名构造
+错误，fail-closed 不留静默失效臂）。**实现期两教训**：①版本序
+`strip_prefix('v')` 必须配 `unwrap_or(a)`（Go `TrimPrefix` 是「有则去无则
+留」——漏了无前缀的常见版本号全落字典序，模块单测当场抓住）；②夹具
+指纹必须按实际注入身份计（latest 解析出 2.0 而夹具按 3 计 → 门具名拒，
+反证门在回源路径执法）。
 
 ## 审计记录（2026-10-21，四路子智能体对抗审计）
 
