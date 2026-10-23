@@ -857,6 +857,9 @@ impl SuspendedExecution {
             flow,
             rc,
             host,
+            // worker 从 checkpoint 重建的现场没有调用栈——持久化层携带
+            // 嵌套路径后由 worker 侧回填（M2）；进程内语义 = 根流程挂起。
+            call_stack: Vec::new(),
         }
     }
 

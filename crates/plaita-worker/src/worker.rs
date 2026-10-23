@@ -1770,6 +1770,15 @@ fn normalize_engine_error(err: &FlowError) -> Value {
             None,
             None,
         ),
+        // NS-M1 后 SuspendRejected 是终态具名拒绝（作用域闸）：归类
+        // SuspendRejected 专型，不落泛化 Other。
+        FlowError::SuspendRejected { .. } => terminal_error_state(
+            "SuspendRejected",
+            FLOW_ERROR_CODE,
+            &err.to_string(),
+            None,
+            None,
+        ),
         FlowError::Suspended(_) | FlowError::ResumeGuard { .. } | FlowError::ResumeError { .. } => {
             terminal_error_state("Other", FLOW_ERROR_CODE, &err.to_string(), None, None)
         }
