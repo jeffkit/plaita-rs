@@ -598,6 +598,20 @@ impl Worker {
                 events::event_bridge_loop(backend, cfg, Arc::new(queue), subs, stop)
             }));
         }
+        // Event storage reconciler (§8.2 M3 — the bridge's subscription-
+        // window backstop; PLAITA_DISABLE_EVENT_RECONCILE=1 bypasses the
+        // whole face inside the loop).
+        {
+            let backend = self.backend.clone();
+            let cfg = self.cfg.clone();
+            let queue =
+                TaskQueue::new(self.backend.clone(), self.cfg.clone(), self.metrics.clone());
+            let subs = self.subs.clone();
+            let stop = self.stop.clone();
+            handles.push(std::thread::spawn(move || {
+                crate::reconcile::reconcile_loop(backend, cfg, Arc::new(queue), subs, stop)
+            }));
+        }
         // Registry heartbeat (§8.1 layer 1) — starts BEFORE the running
         // flip so the entry exists from the first second; the running flip
         // below persists immediately.

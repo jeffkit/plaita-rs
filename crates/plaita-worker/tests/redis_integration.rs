@@ -203,6 +203,86 @@ fn real_redis_suspend_wake_resume_full_chain() {
     assert!(env.subs.get("", &sub_id).unwrap().is_none());
 }
 
+/// 回扫器真 Redis 腿（rs#17 WK-M3）：确认窗口内丢失的事件经存储对账仍
+/// 投递。事件存储前缀改写到测试命名空间（生产 `{esp}` 绝不触碰，Drop 清
+/// 才能覆盖）。
+#[test]
+#[ignore = "real-Redis leg: run with PLAITA_RS_REDIS_TESTS=1 cargo test -- --ignored"]
+fn real_redis_reconcile_replays_window_lost_events() {
+    let env = Env::setup_with("reconcile", &|cfg| {
+        cfg.event_storage_prefix = format!("{}:event-storage:", cfg.key_prefix);
+    });
+    let backend = env.dyn_backend();
+    flowsource::preset_flow_definition(
+        backend.as_ref(),
+        &env.cfg,
+        "",
+        "wf1",
+        "v1",
+        EVENT_FLOW.as_bytes(),
+    )
+    .unwrap();
+    env.queue
+        .enqueue(
+            &json!({
+                "type": "start",
+                "flow_id": "wf1",
+                "execution_id": "it-exec-rc",
+                "params": {"who": "rc"},
+                "timestamp": now_iso(),
+            }),
+            1,
+        )
+        .unwrap();
+    env.worker.process_one().unwrap();
+    let cp = checkpoint::load(backend.as_ref(), &env.cfg, "", "it-exec-rc")
+        .unwrap()
+        .expect("checkpoint");
+    let sub_id = cp.context["nodes"]["e1"]["subscription_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(env.subs.get("", &sub_id).unwrap().is_some());
+
+    // 只落存储（无 Pub/Sub 通知）：记录 + 类型索引，与 Python
+    // store_event_sync 两键同形。
+    let record = json!({
+        "event_id": "it-evt-rc",
+        "event_type": "tick",
+        "data": {"status": "completed"},
+        "timestamp": plaita_worker::config::float_epoch() - 5.0,
+        "source": "it",
+        "correlation_id": "it-exec-rc",
+        "tenant_id": null,
+    });
+    backend
+        .set(
+            &keys::event_storage_record_key(&env.cfg, "it-evt-rc"),
+            &record.to_string(),
+            Some(7 * 86400),
+        )
+        .unwrap();
+    backend
+        .zadd(
+            &keys::event_storage_type_index_key(&env.cfg, "tick"),
+            plaita_worker::config::float_epoch() - 5.0,
+            "it-evt-rc",
+        )
+        .unwrap();
+
+    let outcome =
+        plaita_worker::reconcile::scan_once(&backend, &env.cfg, &env.queue, &env.subs).unwrap();
+    assert_eq!(outcome.replayed, 1);
+    assert_eq!(env.queue.depth(), 1, "exactly one resume carrier");
+
+    env.worker.process_one().unwrap();
+    let row = state::load(backend.as_ref(), &env.cfg, "", "it-exec-rc")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, state::STATUS_COMPLETED);
+    assert_eq!(row.context["nodes"]["mid"]["seen"], "completed");
+}
+
 /// Lua 三脚本 + fenced CAS 在真 Redis 上的行为（与 fake 钉死的语义对拍）。
 #[test]
 #[ignore = "real-Redis leg: run with PLAITA_RS_REDIS_TESTS=1 cargo test -- --ignored"]

@@ -40,6 +40,7 @@ pub mod lease;
 pub mod metrics;
 pub mod queue;
 pub mod quota;
+pub mod reconcile;
 pub mod redis_impl;
 pub mod registry;
 pub mod retry;
@@ -63,6 +64,7 @@ pub use flowsource::{
 pub use lease::{holder_instance_id, new_holder_token, LeaseHandle};
 pub use metrics::{Metrics, NoopMetrics, METRIC_DLQ_TOTAL, METRIC_EXEC_RESULT, METRIC_QUEUE_DEPTH};
 pub use queue::{Delivery, Task, TaskQueue};
+pub use reconcile::{reconcile_loop, scan_once, ScanOutcome};
 pub use redis_impl::RedisConnection;
 pub use registry::{
     Registry, REG_STATUS_DRAINING, REG_STATUS_RUNNING, REG_STATUS_STARTING, REG_STATUS_STOPPED,

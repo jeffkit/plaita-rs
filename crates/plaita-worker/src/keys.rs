@@ -228,3 +228,27 @@ pub fn execution_events_channel(cfg: &Config, execution_id: &str) -> String {
 pub fn event_bridge_pattern(cfg: &Config) -> String {
     format!("{}*:events:*", cfg.key_prefix)
 }
+
+// -- 事件存储对账（§8.2 回扫器，Python event_reconcile.py 对应物）--------
+
+/// `{esp}events:{event_id}` — 业务事件记录（string，Python Event JSON；
+/// 发布端 store_event_sync 写，TTL 7d）。`{esp}` = `cfg.event_storage_prefix`
+/// （发布方的存储命名空间，默认 `plaita:event:`，不从 worker KeyPrefix 派生
+/// ——与 Python 发布端逐字同键，混合部署共用一份存储）。
+pub fn event_storage_record_key(cfg: &Config, event_id: &str) -> String {
+    format!("{}events:{}", cfg.event_storage_prefix, event_id)
+}
+
+/// `{esp}types:{event_type}` — 事件类型索引（ZSET，member=event_id，
+/// score=event.timestamp；同 store_event_sync）。
+pub fn event_storage_type_index_key(cfg: &Config, event_type: &str) -> String {
+    format!("{}types:{}", cfg.event_storage_prefix, event_type)
+}
+
+/// `{prefix}:event_reconcile:cursor` — 回扫游标（复合 `<ts>|<event_id>`，
+/// TTL 7d）。默认前缀下与 Python 固定键 `plaita:event_reconcile:cursor`
+/// 逐字同键；从 worker 前缀派生是为影子隔离与多命名空间私有书签
+/// （Python 侧多对账进程共享一个全局游标——有意分歧，见 reconcile.rs）。
+pub fn event_reconcile_cursor_key(cfg: &Config) -> String {
+    format!("{}:event_reconcile:cursor", cfg.key_prefix)
+}
