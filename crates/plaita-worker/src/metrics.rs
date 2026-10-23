@@ -55,6 +55,10 @@ pub const METRIC_QUOTA_EXCEEDED_TOTAL: &str = "tenant_quota_exceeded_total";
 pub const METRIC_QUOTA_DEFERRED_TOTAL: &str = "tenant_quota_deferred_total";
 pub const METRIC_QUOTA_BYPASSED_TOTAL: &str = "tenant_quota_bypassed_total";
 pub const METRIC_QUOTA_RUNNING: &str = "tenant_quota_running";
+/// Age-gated carriers (#29; labels tenant/type).
+pub const METRIC_TASK_EXPIRED_TOTAL: &str = "task_expired_total";
+/// Fail-closed drops (age undeterminable; labels tenant/type).
+pub const METRIC_TASK_AGE_UNKNOWN_TOTAL: &str = "task_age_unknown_total";
 
 /// A recording sink for tests (labels joined into a stable key).
 #[derive(Default)]

@@ -624,6 +624,39 @@ impl Worker {
             return Ok(true);
         }
         let task = delivery.task;
+        // #29 age gate: carriers past the horizon are acked without executing
+        // and the drop is observable (log + counter + live execution event).
+        // Placement mirrors Python's dispatch gate: after the drain post-read
+        // gate (receiving worker re-checks its own copy) and before the quota
+        // gate (an expired carrier must not consume a slot) and before any
+        // execution.
+        if crate::agegate::carrier_too_old(&self.cfg, &task, &delivery.envelope.message_id) {
+            self.metrics.inc_counter(
+                if crate::agegate::carrier_age_seconds(&task, &delivery.envelope.message_id).1 {
+                    crate::metrics::METRIC_TASK_EXPIRED_TOTAL
+                } else {
+                    crate::metrics::METRIC_TASK_AGE_UNKNOWN_TOTAL
+                },
+                &[
+                    ("tenant", task.tenant_id.as_str()),
+                    ("type", task.task_type.as_str()),
+                ],
+            );
+            eprintln!(
+                "[worker] task past the age horizon, acked without executing (type={},                  execution_id={}, flow_id={}, message_id={}, age_seconds={})",
+                task.task_type,
+                task.execution_id,
+                task.flow_id,
+                task.message_id,
+                crate::agegate::task_age_of(&task, &delivery.envelope.message_id)
+            );
+            if !task.execution_id.is_empty() {
+                let ev = crate::agegate::task_expired_event(&task, &delivery.envelope.message_id);
+                self.publish_execution_event(&task.execution_id, &ev);
+            }
+            self.queue.ack(&task.message_id)?;
+            return Ok(true);
+        }
         let result = match task.task_type.as_str() {
             "start" => self.handle_start(&task),
             "resume" => self.handle_resume(&task),

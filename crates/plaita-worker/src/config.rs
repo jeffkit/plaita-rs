@@ -108,6 +108,9 @@ pub struct Config {
     pub quota_defer_max: i64,
     /// PLAITA_DISABLE_TENANT_QUOTA=1 ——回滚开关（整闸旁路）。
     pub disable_tenant_quota: bool,
+    /// PLAITA_TASK_MAX_AGE_SECONDS（#29，默认 30 天）——载体年龄闸地平线；
+    /// 0/未设回默认，负值=整闸关闭（agegate.rs）。
+    pub task_max_age_secs: i64,
 }
 
 impl Default for Config {
@@ -152,6 +155,7 @@ impl Config {
             tenant_running_ttl_secs: env_i64(&getenv, "PLAITA_TENANT_RUNNING_TTL_SECONDS", 86_400),
             quota_defer_max: env_i64(&getenv, "PLAITA_TENANT_QUOTA_DEFER_MAX", 64),
             disable_tenant_quota: getenv("PLAITA_DISABLE_TENANT_QUOTA") == "1",
+            task_max_age_secs: env_i64(&getenv, "PLAITA_TASK_MAX_AGE_SECONDS", 30 * 86_400),
             flow_source: plaita_engine::flowsource::FlowSourceConfig::from_getenv(&getenv),
         };
         cfg.normalize();
@@ -237,6 +241,11 @@ impl Config {
         }
         if self.quota_defer_max <= 0 {
             self.quota_defer_max = 64;
+        }
+        // task_max_age_secs: 0/unset → the 30-day default; a NEGATIVE value
+        // (explicitly configured) disables the gate (agegate.go:108-111).
+        if self.task_max_age_secs == 0 {
+            self.task_max_age_secs = 30 * 86_400;
         }
         // execution_deadline_secs: env 解析已按「非法/≤0 回默认 + WARNING」
         // 处理；这里只兜结构体直构的 NaN。

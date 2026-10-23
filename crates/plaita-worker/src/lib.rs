@@ -27,6 +27,7 @@
 //! `SuspendedExecution::from_parts` + the engine's own `resume` chain. The
 //! worker never forks recovery logic.
 
+pub mod agegate;
 pub mod backend;
 pub mod checkpoint;
 pub mod config;
