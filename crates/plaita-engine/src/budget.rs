@@ -97,6 +97,21 @@ pub fn default_execution_deadline() -> Duration {
 mod tests {
     use super::*;
 
+    /// 根流缺省格（B4 r11 负控）：env 未设时缺省预算 = 1800s（owner 裁决
+    /// 2026-10-23 维持「缺省 1800s 不变」）。该缺省只被根流入口
+    /// `Flow::execute` 消费；子流沿父 remaining min 合成（context.rs::child），
+    /// 不在此口径内。红证：常数归零后本格即红（0 ≠ 1800）。
+    #[test]
+    fn default_execution_deadline_is_1800s_when_env_unset() {
+        let saved = std::env::var(EXECUTION_DEADLINE_ENV).ok();
+        std::env::remove_var(EXECUTION_DEADLINE_ENV);
+        let got = default_execution_deadline();
+        if let Some(v) = saved {
+            std::env::set_var(EXECUTION_DEADLINE_ENV, v);
+        }
+        assert_eq!(got, Duration::from_secs(1800));
+    }
+
     /// Python `deadline.default_execution_deadline_ms` 的值域口径：缺省/空串
     /// 静默回默认；非数字/非有限/<=0 回默认但带警告（Err=警告文本）。
     #[test]

@@ -14,10 +14,16 @@
 //! - agentrun + the plaita-nodes node families (gate/notify/…) are rejected
 //!   with per-type hints until ported.
 
+mod flow_hash;
 mod normalize;
 mod scope;
 mod support;
 mod validate;
+
+pub use flow_hash::{
+    canonical_definition_json, flow_definition_hash, verify_definition_hash, FLOW_HASH_ALGO,
+    HASH_ALGO_FIELD, HASH_FIELD,
+};
 
 pub use normalize::{KNOWN_UNSUPPORTED, SUPPORTED_NODE_TYPES};
 pub use scope::Scope;
@@ -45,6 +51,12 @@ pub trait FlowProvider: Send + Sync {
 pub fn load(data: &[u8]) -> Result<Flow, String> {
     let mut doc: Value =
         serde_json::from_slice(data).map_err(|e| format!("ir: parse flow json: {e}"))?;
+    // 内嵌指纹门（plaita#60 语义，B4 r11）：定义带 `definitionHash` 时装载
+    // 前校验——不匹配具名拒（`flow_hash_mismatch`，终态可判不静默）、无该
+    // 键跳过（向后兼容旧定义）；校验通过后保留键被剥离，normalize 看到的
+    // 是干净定义。必须在 normalize 之前：normalize 会改写文档，而指纹的
+    // 计算域是存储原始定义。
+    flow_hash::verify_definition_hash(data, &mut doc)?;
     normalize::normalize_doc(&mut doc, Scope::Root)?;
     let flow: Flow = serde_json::from_value(doc).map_err(|e| format!("ir: build flow: {e}"))?;
     flow.validate()
@@ -125,6 +137,8 @@ pub fn capability_manifest() -> Value {
 pub fn load_with_flow_provider(data: &[u8], provider: &dyn FlowProvider) -> Result<Flow, String> {
     let mut doc: Value =
         serde_json::from_slice(data).map_err(|e| format!("ir: parse flow json: {e}"))?;
+    // 同 `load`：装载前内嵌指纹门（normalize 之前，指纹域 = 存储原始定义）。
+    flow_hash::verify_definition_hash(data, &mut doc)?;
     let resolver = normalize::FlowResolver { provider };
     normalize::normalize_doc_with(&mut doc, Scope::Root, Some(&resolver), 0)?;
     let flow: Flow = serde_json::from_value(doc).map_err(|e| format!("ir: build flow: {e}"))?;
