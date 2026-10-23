@@ -89,6 +89,28 @@ pub struct Config {
     /// 另 PLAITA_DEFAULT_TENANT_ID 租户缺省）——键面/缺省/告警口径与引擎
     /// `FlowSourceConfig::from_env` 逐字一致；URL 空 = 特性关闭（本地语义）。
     pub flow_source: plaita_engine::flowsource::FlowSourceConfig,
+    /// PLAITA_EXECUTION_DEADLINE_SECONDS（#35/plaita#267，默认 1800）——
+    /// worker 级执行预算：单次引擎调用占据单消费者的墙钟上限（挂起等待不
+    /// 占预算——resume/continue 载体拿新预算）。env 非法/≤0 回默认 + 具名
+    /// WARNING（绝不静默无界，config.go:483-498 同口径）；**显式负值仅
+    /// Config 结构可表达**（关闸是部署决策，env 永远关不掉）。
+    pub execution_deadline_secs: f64,
+    /// PLAITA_CANCEL_POLL_MS（默认 1000）——在途执行的取消标志轮询间隔。
+    pub cancel_poll_ms: i64,
+    /// PLAITA_TENANT_MAX_RUNNING（默认 0 = 不限）——全局缺省租户并发 start
+    /// 上限（quota.rs；逐租户 HASH 项优先）。
+    pub tenant_max_running: i64,
+    /// PLAITA_TENANT_RUNNING_TTL_SECONDS（默认 86400）——start 槽位条目的
+    /// 崩溃自愈 TTL（quota.go DefaultTenantRunningTTLSeconds）。
+    pub tenant_running_ttl_secs: i64,
+    /// PLAITA_TENANT_QUOTA_DEFER_MAX（默认 64）——超限载体重排预算；尽后
+    /// quota_bypass=true 放行（活性 > 软配额）。
+    pub quota_defer_max: i64,
+    /// PLAITA_DISABLE_TENANT_QUOTA=1 ——回滚开关（整闸旁路）。
+    pub disable_tenant_quota: bool,
+    /// PLAITA_TASK_MAX_AGE_SECONDS（#29，默认 30 天）——载体年龄闸地平线；
+    /// 0/未设回默认，负值=整闸关闭（agegate.rs）。
+    pub task_max_age_secs: i64,
 }
 
 impl Default for Config {
@@ -127,6 +149,13 @@ impl Config {
             flow_cache_ttl_secs: env_i64(&getenv, "PLAITA_FLOW_CACHE_TTL_SECONDS", 300),
             heartbeat_interval_secs: env_i64(&getenv, "PLAITA_HEARTBEAT_INTERVAL_SECONDS", 10),
             registry_ttl_secs: env_i64(&getenv, "PLAITA_REGISTRY_TTL_SECONDS", 30),
+            execution_deadline_secs: env_deadline_seconds(&getenv),
+            cancel_poll_ms: env_i64(&getenv, "PLAITA_CANCEL_POLL_MS", 1000),
+            tenant_max_running: env_i64(&getenv, "PLAITA_TENANT_MAX_RUNNING", 0),
+            tenant_running_ttl_secs: env_i64(&getenv, "PLAITA_TENANT_RUNNING_TTL_SECONDS", 86_400),
+            quota_defer_max: env_i64(&getenv, "PLAITA_TENANT_QUOTA_DEFER_MAX", 64),
+            disable_tenant_quota: getenv("PLAITA_DISABLE_TENANT_QUOTA") == "1",
+            task_max_age_secs: env_i64(&getenv, "PLAITA_TASK_MAX_AGE_SECONDS", 30 * 86_400),
             flow_source: plaita_engine::flowsource::FlowSourceConfig::from_getenv(&getenv),
         };
         cfg.normalize();
@@ -204,6 +233,25 @@ impl Config {
         if self.registry_ttl_secs <= 0 {
             self.registry_ttl_secs = 30;
         }
+        if self.cancel_poll_ms <= 0 {
+            self.cancel_poll_ms = 1000;
+        }
+        if self.tenant_running_ttl_secs <= 0 {
+            self.tenant_running_ttl_secs = 86_400;
+        }
+        if self.quota_defer_max <= 0 {
+            self.quota_defer_max = 64;
+        }
+        // task_max_age_secs: 0/unset → the 30-day default; a NEGATIVE value
+        // (explicitly configured) disables the gate (agegate.go:108-111).
+        if self.task_max_age_secs == 0 {
+            self.task_max_age_secs = 30 * 86_400;
+        }
+        // execution_deadline_secs: env 解析已按「非法/≤0 回默认 + WARNING」
+        // 处理；这里只兜结构体直构的 NaN。
+        if self.execution_deadline_secs.is_nan() {
+            self.execution_deadline_secs = DEFAULT_EXECUTION_DEADLINE_SECS;
+        }
     }
 
     /// The tenant-routed key namespace (§3): the plain prefix for the
@@ -264,6 +312,36 @@ fn env_f64(getenv: &impl Fn(&str) -> String, key: &str, default: f64) -> f64 {
     }
     v.trim().parse().unwrap_or(default)
 }
+
+/// Worker-level execution budget default (§11.3: 1800s, the same value the
+/// engine's budget layer uses — the double layer composes to the stricter
+/// one naturally).
+pub const DEFAULT_EXECUTION_DEADLINE_SECS: f64 = 1800.0;
+
+/// PLAITA_EXECUTION_DEADLINE_SECONDS (config.go:483-498 同口径): unset →
+/// default; non-numeric / non-finite / ≤0 → default + named WARNING (never a
+/// silent unbounded run). A NEGATIVE budget is only expressible by assigning
+/// the Config struct directly (disabling the budget is a deployment
+/// decision, never an env accident).
+fn env_deadline_seconds(getenv: &impl Fn(&str) -> String) -> f64 {
+    let v = getenv("PLAITA_EXECUTION_DEADLINE_SECONDS");
+    if v.is_empty() {
+        return DEFAULT_EXECUTION_DEADLINE_SECS;
+    }
+    match v.trim().parse::<f64>() {
+        Ok(n) if n.is_finite() && n > 0.0 => n,
+        other => {
+            eprintln!(
+                "[config] invalid {PLAITA_DEADLINE_ENV}={v:?} (parsed {other:?}); falling back \
+                 to the default {DEFAULT_EXECUTION_DEADLINE_SECS}s — the budget is never \
+                 silently unbounded (set a positive value to configure it)"
+            );
+            DEFAULT_EXECUTION_DEADLINE_SECS
+        }
+    }
+}
+
+const PLAITA_DEADLINE_ENV: &str = "PLAITA_EXECUTION_DEADLINE_SECONDS";
 
 /// Naive local ISO timestamp the Python side writes
 /// (`datetime.now().isoformat()` — no timezone suffix, §6.1).

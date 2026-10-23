@@ -33,6 +33,32 @@ pub const METRIC_QUEUE_DEPTH: &str = "queue_depth";
 pub const METRIC_EXEC_RESULT: &str = "exec_result";
 /// Dead-letter counter with the low-cardinality `reason` label (§4.4).
 pub const METRIC_DLQ_TOTAL: &str = "dlq_total";
+/// One retry carrier actually went out (requeue, not budget exhaust;
+/// labels tenant/flow/node — §10.3 metrics.go MetricRetryTotal).
+pub const METRIC_RETRY_TOTAL: &str = "retry_total";
+/// Duplicate-start idempotent acks / self-feed escapes (labels tenant/reason).
+pub const METRIC_TASK_DEDUP_HIT_TOTAL: &str = "task_dedup_hit_total";
+/// Lease acquisitions at the execution-entry points (label tenant).
+pub const METRIC_LEASE_ACQUIRED: &str = "lease_acquired";
+/// Mid-run lease losses (§5.3 watchdog; label tenant).
+pub const METRIC_LEASE_LOST: &str = "lease_lost";
+/// One engine invocation's wall-clock occupancy (labels tenant/flow/status).
+pub const METRIC_EXEC_DURATION: &str = "exec_duration";
+/// Executions terminalized by the worker-level execution budget (#35,
+/// plaita#267; label tenant).
+pub const METRIC_EXEC_DEADLINE_TOTAL: &str = "exec_deadline_total";
+/// enqueue→execution latency of any carrier advancing an existing execution
+/// (#31; labels tenant/resume_type).
+pub const METRIC_EVENT_WAKE_LATENCY: &str = "event_wake_latency";
+/// Tenant-quota faces (#30; label tenant; gauge = admitted starts).
+pub const METRIC_QUOTA_EXCEEDED_TOTAL: &str = "tenant_quota_exceeded_total";
+pub const METRIC_QUOTA_DEFERRED_TOTAL: &str = "tenant_quota_deferred_total";
+pub const METRIC_QUOTA_BYPASSED_TOTAL: &str = "tenant_quota_bypassed_total";
+pub const METRIC_QUOTA_RUNNING: &str = "tenant_quota_running";
+/// Age-gated carriers (#29; labels tenant/type).
+pub const METRIC_TASK_EXPIRED_TOTAL: &str = "task_expired_total";
+/// Fail-closed drops (age undeterminable; labels tenant/type).
+pub const METRIC_TASK_AGE_UNKNOWN_TOTAL: &str = "task_age_unknown_total";
 
 /// A recording sink for tests (labels joined into a stable key).
 #[derive(Default)]

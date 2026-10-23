@@ -27,6 +27,7 @@
 //! `SuspendedExecution::from_parts` + the engine's own `resume` chain. The
 //! worker never forks recovery logic.
 
+pub mod agegate;
 pub mod backend;
 pub mod checkpoint;
 pub mod config;
@@ -38,10 +39,13 @@ pub mod keys;
 pub mod lease;
 pub mod metrics;
 pub mod queue;
+pub mod quota;
 pub mod redis_impl;
 pub mod registry;
+pub mod retry;
 pub mod state;
 pub mod subscriptions;
+mod watchdog;
 pub mod worker;
 
 pub use backend::{BackendError, PendingEntry, PsubStream, RedisBackend, StreamEntry, TxOp};
@@ -63,6 +67,10 @@ pub use redis_impl::RedisConnection;
 pub use registry::{
     Registry, REG_STATUS_DRAINING, REG_STATUS_RUNNING, REG_STATUS_STARTING, REG_STATUS_STOPPED,
     REG_STATUS_STOPPING,
+};
+pub use retry::{
+    node_retry_backoff, set_retry_backoff_base_ms, GuardedDeadLetter, DETERMINISTIC_FAILURE_MAX,
+    NODE_RETRY_TOTAL_MAX,
 };
 pub use state::{ExecutionState, STATUS_SUSPENDED};
 pub use subscriptions::{EventSubscription, RedisSubscriptions};

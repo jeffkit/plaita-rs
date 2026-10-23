@@ -578,6 +578,13 @@ impl TaskQueue {
     /// (§4.1 / A44-02): a copy written by this build must never masquerade
     /// as a newer schema than the message it reproduces.
     pub fn enqueue(&self, body: &Value, schema_version: i64) -> Result<String, WorkerError> {
+        self.enqueue_raw(&body.to_string(), schema_version)
+    }
+
+    /// The raw-payload form of [`TaskQueue::enqueue`] — the dead-letter
+    /// guard's recovery clone and the quota defer preserve unknown payload
+    /// fields byte-for-byte (worker.go EnqueueRaw / deferOverQuotaStart).
+    pub fn enqueue_raw(&self, payload: &str, schema_version: i64) -> Result<String, WorkerError> {
         let sv = if schema_version <= 0 {
             TASK_SCHEMA_VERSION
         } else {
@@ -587,7 +594,7 @@ impl TaskQueue {
             .xadd(
                 &keys::queue_key(&self.cfg),
                 &[
-                    ("payload".to_string(), body.to_string()),
+                    ("payload".to_string(), payload.to_string()),
                     ("schema_version".to_string(), sv.to_string()),
                 ],
             )

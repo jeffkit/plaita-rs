@@ -57,6 +57,14 @@ pub enum ErrorKind {
     UnsupportedSchema,
     /// Reclaim delivery ceiling hit (§4.2): guarded dead-letter.
     MaxDeliveries,
+    /// A retryable node failure below the §9.1 budget (retry.rs): the
+    /// consumer loop owes the backoff + enqueue→ack choreography. Never
+    /// leaks to a disposition family of its own.
+    NodeRetryable,
+    /// The tenant's start quota is full (#30): the carrier is re-enqueued at
+    /// the stream tail (quota_defers counter) and the original acked — never
+    /// executed, never dead-lettered by this path (quota.rs).
+    QuotaDeferred,
 }
 
 impl ErrorKind {
@@ -99,6 +107,19 @@ impl ErrorKind {
 pub struct WorkerError {
     pub kind: ErrorKind,
     pub message: String,
+    /// §9.1 payload for the NodeRetryable control-flow error: what the
+    /// consumer loop's re-enqueue choreography needs (retry.go
+    /// NodeRetryableError).
+    pub node_retry: Option<NodeRetryPayload>,
+}
+
+/// The retryable-failure data carrier (§9.1).
+#[derive(Debug, Clone)]
+pub struct NodeRetryPayload {
+    pub execution_id: String,
+    pub failed_node: String,
+    pub attempt: i64,
+    pub budget: i64,
 }
 
 impl WorkerError {
@@ -106,6 +127,7 @@ impl WorkerError {
         WorkerError {
             kind,
             message: message.into(),
+            node_retry: None,
         }
     }
 
@@ -113,8 +135,25 @@ impl WorkerError {
         WorkerError::new(ErrorKind::Transient, message)
     }
 
+    pub fn node_retryable(p: NodeRetryPayload) -> WorkerError {
+        WorkerError {
+            kind: ErrorKind::NodeRetryable,
+            message: format!(
+                "retryable node failure below budget (execution_id={}, node={}, attempt={}, \
+                 budget={})",
+                p.execution_id, p.failed_node, p.attempt, p.budget
+            ),
+            node_retry: Some(p),
+        }
+    }
+
     pub fn kind(&self) -> ErrorKind {
         self.kind
+    }
+
+    /// The NodeRetryable payload, when this error is one.
+    pub fn node_retry(&self) -> Option<&NodeRetryPayload> {
+        self.node_retry.as_ref()
     }
 
     /// Terminal error name for worker-judged terminals (§5.4 error_type);

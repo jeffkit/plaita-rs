@@ -13,10 +13,12 @@ use crate::config::Config;
 /// (ServiceInfo JSON; SETEX TTL 30s, heartbeat 10s — §8.1, plaita-go
 /// registry.go 同形)。`{prefix}` 派生（namespace-wide 服务面）。
 pub fn registry_worker_key(cfg: &Config) -> String {
-    format!(
-        "{}:registry:flow_worker:{}",
-        cfg.key_prefix, cfg.instance_id
-    )
+    registry_worker_key_of(cfg, &cfg.instance_id)
+}
+
+/// 同上，但实例 id 由调用方给出（LookupStatus 查询面读他实例的注册键）。
+pub fn registry_worker_key_of(cfg: &Config, instance_id: &str) -> String {
+    format!("{}:registry:flow_worker:{}", cfg.key_prefix, instance_id)
 }
 
 /// `{prefix}:flow:queue` — task main queue (stream).
@@ -57,6 +59,65 @@ pub fn fencegen_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
         cfg.namespace(tenant),
         execution_id
     )
+}
+
+/// `{ns}:execution:noderetry:{id}[:{node}]` — per-node retry budget counter
+/// (sliding TTL 7d; without the node segment = execution-level fallback,
+/// §9.1 / retry.go:15-27).
+pub fn noderetry_key(cfg: &Config, tenant: &str, execution_id: &str, node_id: &str) -> String {
+    let base = format!(
+        "{}:execution:noderetry:{}",
+        cfg.namespace(tenant),
+        execution_id
+    );
+    if node_id.is_empty() {
+        base
+    } else {
+        format!("{base}:{node_id}")
+    }
+}
+
+/// `{ns}:execution:noderefetch:{id}` — total retry ceiling counter (100).
+pub fn noderefetch_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!(
+        "{}:execution:noderefetch:{}",
+        cfg.namespace(tenant),
+        execution_id
+    )
+}
+
+/// `{ns}:execution:nofail:{id}` — deterministic-failure ceiling counter (12).
+pub fn nofail_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!(
+        "{}:execution:nofail:{}",
+        cfg.namespace(tenant),
+        execution_id
+    )
+}
+
+/// `{prefix}:tenant_quota` — HASH tenant_id → max concurrent starts (platform
+/// mechanism key, NOT tenant-routed: every worker enforces the same view;
+/// §3 键表 / quota.go:17-22).
+pub fn tenant_quota_key(cfg: &Config) -> String {
+    format!("{}:tenant_quota", cfg.key_prefix)
+}
+
+/// `{prefix}:tenant_running:{t}` — ZSET member=execution_id, score=expiry
+/// (the start-slot semaphore; empty tenant normalizes to default).
+pub fn tenant_running_key(cfg: &Config, tenant: &str) -> String {
+    let t = if tenant.is_empty() {
+        cfg.default_tenant_id.as_str()
+    } else {
+        tenant
+    };
+    format!("{}:tenant_running:{}", cfg.key_prefix, t)
+}
+
+/// `{prefix}:exec_tombstone:{id}` — deletion tombstone (platform-root key,
+/// NOT tenant-routed; the console deletion API writes it — §8.3). A tombstone
+/// forbids re-enqueueing carriers for the deleted execution (A51-01).
+pub fn tombstone_key(cfg: &Config, execution_id: &str) -> String {
+    format!("{}:exec_tombstone:{}", cfg.key_prefix, execution_id)
 }
 
 /// `{ns}:execution:cancel:{id}` — cancel intent flag (value = ISO time,

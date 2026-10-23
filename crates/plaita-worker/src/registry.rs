@@ -28,6 +28,7 @@ use serde_json::{json, Map, Value};
 
 use crate::backend::RedisBackend;
 use crate::config::{now_iso, Config};
+use crate::error::WorkerError;
 use crate::keys;
 
 /// Registry 生命周期状态（§8.1/§9.3；plaita-go RegStatus* 同值）。
@@ -201,6 +202,25 @@ impl Registry {
                 Some(self.cfg.registry_ttl_secs),
             )
             .map_err(|e| format!("registry write: {e}"))
+    }
+
+    /// §8.1 查询面（registry.go:254-267 LookupStatus 同款）：读他实例的
+    /// 注册状态——§5.3 租约冲突处置的存活证据源。键缺失 = Ok(None)（「键已
+    /// 过期」与「刚停」同为不可存活证据）；存在但损坏 = Err（fail-closed，
+    /// 调用方保守留 pending）。
+    pub fn lookup_status(&self, instance_id: &str) -> Result<Option<String>, WorkerError> {
+        let Some(raw) = self
+            .backend
+            .get(&keys::registry_worker_key_of(&self.cfg, instance_id))
+            .map_err(|e| WorkerError::transient(format!("registry lookup: {e}")))?
+        else {
+            return Ok(None);
+        };
+        let v: Value = serde_json::from_str(&raw)
+            .map_err(|e| WorkerError::transient(format!("registry entry unparsable: {e}")))?;
+        Ok(v.get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string()))
     }
 
     /// 心跳环：每 heartbeat_interval 整份重写，直到 stop 置位（§8.1 层 1）。
