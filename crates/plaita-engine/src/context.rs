@@ -480,6 +480,76 @@ impl RuntimeCtx {
             "execution_id": inner.execution_id,
         })
     }
+
+    /// Rebuilds a root context from a [`RuntimeCtx::snapshot_json`] value —
+    /// the worker-layer checkpoint recovery entry (rs-worker-design §7.4
+    /// E1; the `context_flavor: plaita-rs-snapshot-v1` gate lives in the
+    /// worker's checkpoint store, this constructor only speaks the snapshot
+    /// shape).
+    ///
+    /// All nine roots are REQUIRED: a missing or wrongly-typed root is a
+    /// named error, never a silent default — a snapshot that cannot be
+    /// rebuilt must not silently become an empty context "resuming from the
+    /// wrong place". `parent` is `None` (suspension only happens in the root
+    /// execution — the engine's root-flow gate makes the parent chain
+    /// unnecessary in a snapshot) and the flow budget is left unset (the
+    /// resume path issues a fresh budget).
+    pub fn from_snapshot_json(snapshot: &Value) -> Result<RuntimeCtx, String> {
+        const ROOTS: &str =
+            "input/nodes/errors/env/global/last_node/last_branch/flow_id/execution_id";
+        let obj = snapshot.as_object().ok_or_else(|| {
+            format!("snapshot_json rebuild: expected a JSON object, got {snapshot}")
+        })?;
+        let missing = |name: &str| {
+            format!("snapshot_json rebuild: missing root {name:?} (a snapshot must carry all nine roots: {ROOTS})")
+        };
+        let expect_object = |name: &str, v: &Value| {
+            v.as_object().map(|_| ()).ok_or_else(|| {
+                format!("snapshot_json rebuild: root {name:?} must be a JSON object, got {v}")
+            })
+        };
+        let ctx = RuntimeCtx::new();
+        {
+            let mut inner = ctx.inner.write().expect("ctx lock");
+            inner.input = obj.get("input").ok_or_else(|| missing("input"))?.clone();
+            for name in ["nodes", "errors", "env", "global"] {
+                let v = obj.get(name).ok_or_else(|| missing(name))?;
+                expect_object(name, v)?;
+            }
+            inner.nodes = obj["nodes"].clone();
+            inner.errors = obj["errors"].clone();
+            inner.env = obj["env"].clone();
+            inner.global = obj["global"].clone();
+            inner.last_node = match obj.get("last_node").ok_or_else(|| missing("last_node"))? {
+                Value::Null => None,
+                Value::String(s) => Some(s.clone()),
+                other => {
+                    return Err(format!(
+                        "snapshot_json rebuild: root \"last_node\" must be null or a string, got {other}"
+                    ))
+                }
+            };
+            inner.last_branch = match obj
+                .get("last_branch")
+                .ok_or_else(|| missing("last_branch"))?
+            {
+                Value::Null => None,
+                v => Some(v.clone()),
+            };
+            for name in ["flow_id", "execution_id"] {
+                let v = obj.get(name).ok_or_else(|| missing(name))?;
+                let s = v.as_str().ok_or_else(|| {
+                    format!("snapshot_json rebuild: root {name:?} must be a string, got {v}")
+                })?;
+                if name == "flow_id" {
+                    inner.flow_id = s.to_string();
+                } else {
+                    inner.execution_id = s.to_string();
+                }
+            }
+        }
+        Ok(ctx)
+    }
 }
 
 impl Roots for RuntimeCtx {
