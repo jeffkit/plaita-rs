@@ -360,6 +360,8 @@ pub struct Worker {
     active_tasks: Arc<std::sync::atomic::AtomicUsize>,
     /// §9.1 三计数面（retry.rs；M2）。
     pub(crate) retry_budgets: crate::retry::RetryBudgets,
+    /// #30 租户并发 start 闸（quota.rs；M2）。
+    pub(crate) quota: crate::quota::TenantQuota,
     drain: Mutex<DrainState>,
     active: Mutex<Option<ActiveRun>>,
     pub(crate) stop: Arc<AtomicBool>,
@@ -384,6 +386,7 @@ impl Worker {
             active_tasks.clone(),
         ));
         let retry_budgets = crate::retry::RetryBudgets::new(backend.clone(), cfg.clone());
+        let quota = crate::quota::TenantQuota::new(backend.clone(), cfg.clone());
         // §4.4 守卫死信（M2）：投递天花板命中时先过分支表（活租约跳过、
         // 墓碑放行不克隆、running 且预算尽先终态化、非终态无租约先克隆恢复
         // 载体再放行——retry.rs GuardedDeadLetter）。
@@ -394,6 +397,7 @@ impl Worker {
                 backend.clone(),
                 cfg.clone(),
             )),
+            quota: crate::quota::TenantQuota::new(backend.clone(), cfg.clone()),
         }));
         Worker {
             backend,
@@ -405,6 +409,7 @@ impl Worker {
             registry,
             active_tasks,
             retry_budgets,
+            quota,
             drain: Mutex::new(DrainState::default()),
             active: Mutex::new(None),
             stop: Arc::new(AtomicBool::new(false)),
@@ -638,6 +643,14 @@ impl Worker {
                 Ok(true)
             }
             Err(e) => {
+                if e.kind() == ErrorKind::QuotaDeferred {
+                    // #30: an over-quota start is deferred to the stream tail
+                    // (never executed, never dead-lettered); the enqueue→ack
+                    // happens there.
+                    return self
+                        .defer_over_quota_start(&task, Some(delivery.envelope.payload_raw.as_str()))
+                        .map(|_| true);
+                }
                 if let Some(nr) = e.node_retry() {
                     // §9.1: a retryable failure below budget — backoff
                     // (interruptible shards), enqueue a fresh carrier, ack
@@ -834,9 +847,42 @@ impl Worker {
             state_row.last_update_time = now;
             state::save(self.backend.as_ref(), &self.cfg, &tenant, &state_row, 0)
                 .map_err(|e| WorkerError::transient(format!("entry-cancel persist: {e}")))?;
+            self.release_quota_slot(&tenant, &execution_id);
             self.delete_checkpoint(&tenant, &execution_id);
             eprintln!("[worker] execution cancelled at entry (execution_id={execution_id})");
             return Ok(());
+        }
+
+        // #30 tenant quota admit (§9.3 闸序): after the idempotency gate (a
+        // duplicate must not retake a slot the live execution already holds)
+        // and the entry-cancel checkpoint, before the running row (a denied
+        // start never executes). Unconfigured tenants never touch Redis here
+        // (default = unlimited). A quota_bypass carrier (defer budget
+        // exhausted) skips the gate entirely — liveness over the soft quota.
+        if !task.quota_bypass {
+            let (allowed, running) = self.quota.admit_start(&tenant, &execution_id);
+            if let Some(r) = running {
+                self.metrics.set_gauge(
+                    crate::metrics::METRIC_QUOTA_RUNNING,
+                    r as f64,
+                    &[("tenant", tenant.as_str())],
+                );
+            }
+            if !allowed {
+                let _ = lease::release_with(self.backend.as_ref(), &self.cfg, &handle);
+                self.metrics.inc_counter(
+                    crate::metrics::METRIC_QUOTA_EXCEEDED_TOTAL,
+                    &[("tenant", tenant.as_str())],
+                );
+                eprintln!(
+                    "[quota] tenant start quota full, deferring the carrier (tenant={},                      execution_id={execution_id})",
+                    tenant
+                );
+                return Err(WorkerError::new(
+                    ErrorKind::QuotaDeferred,
+                    format!("tenant start quota full ({execution_id})"),
+                ));
+            }
         }
 
         // Flow definition (§4.6 via the FlowSource chain, B4 round 15):
@@ -1133,6 +1179,7 @@ impl Worker {
         row.last_update_time = now;
         state::save(self.backend.as_ref(), &self.cfg, tenant, &row, fence_gen)
             .map_err(|e| WorkerError::transient(format!("cancelled persist: {e}")))?;
+        self.release_quota_slot(tenant, execution_id);
         self.delete_checkpoint(tenant, execution_id);
         eprintln!("[worker] resume terminalized cancelled execution (execution_id={execution_id})");
         Ok(())
@@ -1616,6 +1663,7 @@ impl Worker {
             .map_err(|e| WorkerError::transient(format!("cancelled persist: {e}")));
             let _ = lease::release_with(self.backend.as_ref(), &self.cfg, handle);
             r?;
+            self.release_quota_slot(&tenant, &task.execution_id);
             self.delete_checkpoint(&tenant, &task.execution_id);
             return Ok(());
         }
@@ -1840,6 +1888,7 @@ impl Worker {
                 .map_err(|e| WorkerError::transient(format!("completed persist: {e}")));
                 let _ = lease::release_with(self.backend.as_ref(), &self.cfg, handle);
                 if r.is_ok() {
+                    self.release_quota_slot(&tenant, &task.execution_id);
                     // §9.1: a fully successful run resets every counter —
                     // the executed nodes' per-node budgets AND the two
                     // consecutive-failure ceilings.
@@ -2128,6 +2177,7 @@ impl Worker {
             fence_gen,
         )
         .map_err(|e| WorkerError::transient(format!("error terminal persist: {e}")))?;
+        self.release_quota_slot(tenant, &state_row.execution_id);
         self.delete_checkpoint(tenant, &state_row.execution_id);
         Ok(())
     }

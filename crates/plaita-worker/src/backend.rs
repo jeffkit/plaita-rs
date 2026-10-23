@@ -127,6 +127,10 @@ pub trait RedisBackend: Send + Sync {
     fn incr_by(&self, key: &str, delta: i64) -> BackendResult<i64>;
     fn hincr_by(&self, key: &str, field: &str, delta: i64) -> BackendResult<i64>;
     fn hdel(&self, key: &str, field: &str) -> BackendResult<i64>;
+    /// HGET one field (None = missing field/key).
+    fn hget(&self, key: &str, field: &str) -> BackendResult<Option<String>>;
+    /// HSET one field (test/config writers; the quota gate only reads).
+    fn hset(&self, key: &str, field: &str, value: &str) -> BackendResult<i64>;
 
     // -- sets / zsets / lists ---------------------------------------------
     fn sadd(&self, key: &str, member: &str) -> BackendResult<()>;
@@ -232,6 +236,19 @@ pub trait RedisBackend: Send + Sync {
         ttl_secs: i64,
         score: f64,
     ) -> BackendResult<i64>;
+
+    /// Per-tenant start admission (quota.go luaAdmitTenantStart — verbatim
+    /// semantics): purge expired members, idempotently refresh an existing
+    /// member (message-redelivery safe), ZADD + key EXPIRE when below the
+    /// cap, deny when full. Returns (allowed, running) for the quota gauge.
+    fn tenant_quota_admit(
+        &self,
+        running_key: &str,
+        now: f64,
+        ttl_secs: f64,
+        cap: i64,
+        member: &str,
+    ) -> BackendResult<(i64, i64)>;
 
     /// Transactional pipeline (atomic on the real backend).
     fn tx(&self, ops: &[TxOp]) -> BackendResult<()>;

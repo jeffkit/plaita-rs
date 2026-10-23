@@ -61,6 +61,10 @@ pub enum ErrorKind {
     /// consumer loop owes the backoff + enqueue→ack choreography. Never
     /// leaks to a disposition family of its own.
     NodeRetryable,
+    /// The tenant's start quota is full (#30): the carrier is re-enqueued at
+    /// the stream tail (quota_defers counter) and the original acked — never
+    /// executed, never dead-lettered by this path (quota.rs).
+    QuotaDeferred,
 }
 
 impl ErrorKind {

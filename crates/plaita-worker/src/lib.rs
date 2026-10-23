@@ -38,6 +38,7 @@ pub mod keys;
 pub mod lease;
 pub mod metrics;
 pub mod queue;
+pub mod quota;
 pub mod redis_impl;
 pub mod registry;
 pub mod retry;

@@ -531,6 +531,27 @@ impl RedisBackend for FakeRedis {
         Ok(n)
     }
 
+    fn hget(&self, key: &str, field: &str) -> Result_<Option<String>> {
+        let mut store = self.store.lock().unwrap();
+        Self::gc_key(&mut store, key);
+        Ok(store
+            .hashes
+            .get(key)
+            .and_then(|e| e.value.get(field).cloned()))
+    }
+
+    fn hset(&self, key: &str, field: &str, value: &str) -> Result_<i64> {
+        let mut store = self.store.lock().unwrap();
+        Self::gc_key(&mut store, key);
+        let e = store
+            .hashes
+            .entry(key.to_string())
+            .or_insert_with(|| Entry::new(HashMap::new()));
+        let inserted = if e.value.contains_key(field) { 0 } else { 1 };
+        e.value.insert(field.to_string(), value.to_string());
+        Ok(inserted)
+    }
+
     fn sadd(&self, key: &str, member: &str) -> Result_<()> {
         let mut store = self.store.lock().unwrap();
         Self::gc_key(&mut store, key);
@@ -1105,6 +1126,39 @@ impl RedisBackend for FakeRedis {
             .or_insert_with(|| Entry::new(HashMap::new()));
         e.value.insert(state_key.to_string(), score);
         Ok(1)
+    }
+
+    fn tenant_quota_admit(
+        &self,
+        running_key: &str,
+        now: f64,
+        ttl_secs: f64,
+        cap: i64,
+        member: &str,
+    ) -> Result_<(i64, i64)> {
+        // quota.go luaAdmitTenantStart semantics, natively
+        let mut store = self.store.lock().unwrap();
+        Self::gc_key(&mut store, running_key);
+        let zset = store
+            .zsets
+            .entry(running_key.to_string())
+            .or_insert_with(|| Entry::new(HashMap::new()));
+        zset.value.retain(|_, score| *score >= now);
+        let running = zset.value.len() as i64;
+        if zset.value.contains_key(member) {
+            // existing member: idempotent refresh (redelivery-safe)
+            zset.value.insert(member.to_string(), now + ttl_secs);
+            let expiry = (ttl_secs.ceil() as i64).max(1) + 60;
+            zset.expiry = Some(Instant::now() + Duration::from_secs(expiry.max(1) as u64));
+            return Ok((1, zset.value.len() as i64));
+        }
+        if running >= cap {
+            return Ok((0, running));
+        }
+        zset.value.insert(member.to_string(), now + ttl_secs);
+        let expiry = (ttl_secs.ceil() as i64).max(1) + 60;
+        zset.expiry = Some(Instant::now() + Duration::from_secs(expiry.max(1) as u64));
+        Ok((1, zset.value.len() as i64))
     }
 
     fn tx(&self, ops: &[TxOp]) -> Result_<()> {

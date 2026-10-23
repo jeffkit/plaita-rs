@@ -509,6 +509,7 @@ pub struct GuardedDeadLetter {
     pub(crate) backend: std::sync::Arc<dyn RedisBackend>,
     pub(crate) cfg: Config,
     pub(crate) retries: std::sync::Arc<RetryBudgets>,
+    pub(crate) quota: crate::quota::TenantQuota,
 }
 
 impl GuardedDeadLetter {
@@ -519,6 +520,7 @@ impl GuardedDeadLetter {
     ) -> GuardedDeadLetter {
         GuardedDeadLetter {
             retries: std::sync::Arc::new(RetryBudgets::new(backend.clone(), cfg.clone())),
+            quota: crate::quota::TenantQuota::new(backend.clone(), cfg.clone()),
             backend,
             cfg,
         }
@@ -570,6 +572,8 @@ impl GuardedDeadLetter {
                 row.execution_id
             );
         }
+        // the terminal write returns the tenant's start slot (quota.rs 收口)
+        self.quota.release(tenant, &row.execution_id);
         true
     }
 }

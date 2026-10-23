@@ -50,6 +50,11 @@ pub const METRIC_EXEC_DEADLINE_TOTAL: &str = "exec_deadline_total";
 /// enqueue→execution latency of any carrier advancing an existing execution
 /// (#31; labels tenant/resume_type).
 pub const METRIC_EVENT_WAKE_LATENCY: &str = "event_wake_latency";
+/// Tenant-quota faces (#30; label tenant; gauge = admitted starts).
+pub const METRIC_QUOTA_EXCEEDED_TOTAL: &str = "tenant_quota_exceeded_total";
+pub const METRIC_QUOTA_DEFERRED_TOTAL: &str = "tenant_quota_deferred_total";
+pub const METRIC_QUOTA_BYPASSED_TOTAL: &str = "tenant_quota_bypassed_total";
+pub const METRIC_QUOTA_RUNNING: &str = "tenant_quota_running";
 
 /// A recording sink for tests (labels joined into a stable key).
 #[derive(Default)]

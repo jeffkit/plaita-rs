@@ -93,6 +93,24 @@ pub fn nofail_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
     )
 }
 
+/// `{prefix}:tenant_quota` — HASH tenant_id → max concurrent starts (platform
+/// mechanism key, NOT tenant-routed: every worker enforces the same view;
+/// §3 键表 / quota.go:17-22).
+pub fn tenant_quota_key(cfg: &Config) -> String {
+    format!("{}:tenant_quota", cfg.key_prefix)
+}
+
+/// `{prefix}:tenant_running:{t}` — ZSET member=execution_id, score=expiry
+/// (the start-slot semaphore; empty tenant normalizes to default).
+pub fn tenant_running_key(cfg: &Config, tenant: &str) -> String {
+    let t = if tenant.is_empty() {
+        cfg.default_tenant_id.as_str()
+    } else {
+        tenant
+    };
+    format!("{}:tenant_running:{}", cfg.key_prefix, t)
+}
+
 /// `{prefix}:exec_tombstone:{id}` — deletion tombstone (platform-root key,
 /// NOT tenant-routed; the console deletion API writes it — §8.3). A tombstone
 /// forbids re-enqueueing carriers for the deleted execution (A51-01).

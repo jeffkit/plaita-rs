@@ -59,6 +59,24 @@ end
 /// AND the never-cleared fencegen counter agrees (#54, A2R25-05); the index
 /// ZADD rides in the same atomic script. Returns 1 written / 0 fence
 /// mismatch / -1 fence-fencegen divergence.
+/// Per-tenant start admission (quota.go luaAdmitTenantStart — verbatim):
+/// KEYS[1] = running ZSET; ARGV: now, ttl, cap, member. Returns
+/// {allowed, running}.
+const LUA_TENANT_QUOTA_ADMIT: &str = r#"
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+if redis.call('ZSCORE', KEYS[1], ARGV[4]) then
+  redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + tonumber(ARGV[2]), ARGV[4])
+  redis.call('EXPIRE', KEYS[1], math.ceil(tonumber(ARGV[2])) + 60)
+  return {1, redis.call('ZCARD', KEYS[1])}
+end
+if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then
+  return {0, redis.call('ZCARD', KEYS[1])}
+end
+redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + tonumber(ARGV[2]), ARGV[4])
+redis.call('EXPIRE', KEYS[1], math.ceil(tonumber(ARGV[2])) + 60)
+return {1, redis.call('ZCARD', KEYS[1])}
+"#;
+
 const LUA_FENCED_STATE_SAVE: &str = r#"
 if redis.call('get', KEYS[2]) ~= ARGV[2] then
   return 0
@@ -243,6 +261,20 @@ impl RedisBackend for RedisConnection {
 
     fn hdel(&self, key: &str, field: &str) -> BackendResult<i64> {
         self.with_conn(|c| c.hdel(key, field).map_err(map_err))
+    }
+
+    fn hget(&self, key: &str, field: &str) -> BackendResult<Option<String>> {
+        self.with_conn(|c| {
+            let v: Option<String> = c.hget(key, field).map_err(map_err)?;
+            Ok(v)
+        })
+    }
+
+    fn hset(&self, key: &str, field: &str, value: &str) -> BackendResult<i64> {
+        self.with_conn(|c| {
+            let n: i64 = c.hset(key, field, value).map_err(map_err)?;
+            Ok(n)
+        })
     }
 
     fn sadd(&self, key: &str, member: &str) -> BackendResult<()> {
@@ -752,6 +784,43 @@ impl RedisBackend for RedisConnection {
                 .arg(format!("{score:.6}"))
                 .invoke(c)
                 .map_err(map_err)
+        })
+    }
+
+    fn tenant_quota_admit(
+        &self,
+        running_key: &str,
+        now: f64,
+        ttl_secs: f64,
+        cap: i64,
+        member: &str,
+    ) -> BackendResult<(i64, i64)> {
+        self.with_conn(|c| {
+            let script = redis::Script::new(LUA_TENANT_QUOTA_ADMIT);
+            let v: redis::Value = script
+                .key(running_key)
+                .arg(format!("{now:.6}"))
+                .arg(format!("{ttl_secs:.6}"))
+                .arg(cap)
+                .arg(member)
+                .invoke(c)
+                .map_err(map_err)?;
+            // The script returns {allowed, running}; an unexpected shape
+            // fails OPEN like any other gate outage (quota.go AdmitStart).
+            let items = match v {
+                redis::Value::Array(items) if items.len() == 2 => items,
+                _ => return Ok((1, 0)),
+            };
+            let as_i64 = |x: redis::Value| match x {
+                redis::Value::Int(n) => n,
+                redis::Value::SimpleString(s) => s.parse().unwrap_or(0),
+                redis::Value::BulkString(d) => String::from_utf8_lossy(&d).parse().unwrap_or(0),
+                _ => 0,
+            };
+            let mut it = items.into_iter();
+            let allowed = as_i64(it.next().unwrap_or(redis::Value::Nil));
+            let running = as_i64(it.next().unwrap_or(redis::Value::Nil));
+            Ok((allowed, running))
         })
     }
 

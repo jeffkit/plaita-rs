@@ -97,6 +97,17 @@ pub struct Config {
     pub execution_deadline_secs: f64,
     /// PLAITA_CANCEL_POLL_MS（默认 1000）——在途执行的取消标志轮询间隔。
     pub cancel_poll_ms: i64,
+    /// PLAITA_TENANT_MAX_RUNNING（默认 0 = 不限）——全局缺省租户并发 start
+    /// 上限（quota.rs；逐租户 HASH 项优先）。
+    pub tenant_max_running: i64,
+    /// PLAITA_TENANT_RUNNING_TTL_SECONDS（默认 86400）——start 槽位条目的
+    /// 崩溃自愈 TTL（quota.go DefaultTenantRunningTTLSeconds）。
+    pub tenant_running_ttl_secs: i64,
+    /// PLAITA_TENANT_QUOTA_DEFER_MAX（默认 64）——超限载体重排预算；尽后
+    /// quota_bypass=true 放行（活性 > 软配额）。
+    pub quota_defer_max: i64,
+    /// PLAITA_DISABLE_TENANT_QUOTA=1 ——回滚开关（整闸旁路）。
+    pub disable_tenant_quota: bool,
 }
 
 impl Default for Config {
@@ -137,6 +148,10 @@ impl Config {
             registry_ttl_secs: env_i64(&getenv, "PLAITA_REGISTRY_TTL_SECONDS", 30),
             execution_deadline_secs: env_deadline_seconds(&getenv),
             cancel_poll_ms: env_i64(&getenv, "PLAITA_CANCEL_POLL_MS", 1000),
+            tenant_max_running: env_i64(&getenv, "PLAITA_TENANT_MAX_RUNNING", 0),
+            tenant_running_ttl_secs: env_i64(&getenv, "PLAITA_TENANT_RUNNING_TTL_SECONDS", 86_400),
+            quota_defer_max: env_i64(&getenv, "PLAITA_TENANT_QUOTA_DEFER_MAX", 64),
+            disable_tenant_quota: getenv("PLAITA_DISABLE_TENANT_QUOTA") == "1",
             flow_source: plaita_engine::flowsource::FlowSourceConfig::from_getenv(&getenv),
         };
         cfg.normalize();
@@ -216,6 +231,12 @@ impl Config {
         }
         if self.cancel_poll_ms <= 0 {
             self.cancel_poll_ms = 1000;
+        }
+        if self.tenant_running_ttl_secs <= 0 {
+            self.tenant_running_ttl_secs = 86_400;
+        }
+        if self.quota_defer_max <= 0 {
+            self.quota_defer_max = 64;
         }
         // execution_deadline_secs: env 解析已按「非法/≤0 回默认 + WARNING」
         // 处理；这里只兜结构体直构的 NaN。
