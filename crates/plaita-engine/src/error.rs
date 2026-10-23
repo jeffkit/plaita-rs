@@ -37,6 +37,9 @@ pub enum ErrorClass {
     Transient,
     /// a deadline fired
     Timeout,
+    /// 挂起作用域闸拒绝（嵌套挂起 v1：迭代帧/分支帧上的挂起）：fail-closed
+    /// 的具名拒绝——不可重试、不可被策略吞（join 哨兵必须让位于它）。
+    SuspendRejected,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +48,10 @@ pub struct NodeError {
     pub class: ErrorClass,
     /// Engine error code carried into $ERROR entries (Go errs.Internal).
     pub code: i64,
+    /// 挂起穿透载体（嵌套挂起 v1）：子执行挂起时由 child/reference 节点体
+    /// 携带上抛——execute_node 必须先于一切策略链原样转发（与取消同待遇），
+    /// advance_from 捕获后把外层帧压入其调用栈。
+    pub suspension: Option<Box<crate::exec::SuspendedExecution>>,
 }
 
 impl NodeError {
@@ -53,6 +60,18 @@ impl NodeError {
             message: message.into(),
             class: ErrorClass::Deterministic,
             code: NODE_GEN_REQUEST_ERROR_CODE,
+            suspension: None,
+        }
+    }
+
+    /// 嵌套挂起穿透载体（不进任何策略链；advance_from 捕获压帧）。
+    pub fn suspension(inner: Box<crate::exec::SuspendedExecution>) -> Self {
+        let node_id = inner.suspended_node.clone();
+        NodeError {
+            message: format!("flow suspended at node {node_id:?} (nested)"),
+            class: ErrorClass::Deterministic,
+            code: NODE_GEN_REQUEST_ERROR_CODE,
+            suspension: Some(inner),
         }
     }
     pub fn transient(message: impl Into<String>) -> Self {
@@ -60,6 +79,7 @@ impl NodeError {
             message: message.into(),
             class: ErrorClass::Transient,
             code: RUNTIME_ERROR_CODE,
+            suspension: None,
         }
     }
     pub fn transient_with_code(message: impl Into<String>, code: i64) -> Self {
@@ -67,6 +87,7 @@ impl NodeError {
             message: message.into(),
             class: ErrorClass::Transient,
             code,
+            suspension: None,
         }
     }
     pub fn timeout(message: impl Into<String>) -> Self {
@@ -74,12 +95,28 @@ impl NodeError {
             message: message.into(),
             class: ErrorClass::Timeout,
             code: RUNTIME_ERROR_CODE,
+            suspension: None,
+        }
+    }
+
+    /// 挂起穿透判定：载体在场时不进 timeout/retry/errorHandler 任何策略链。
+    pub fn is_suspension(&self) -> bool {
+        self.suspension.is_some()
+    }
+
+    /// 挂起作用域闸拒绝。
+    pub fn suspend_rejected(message: impl Into<String>) -> Self {
+        NodeError {
+            message: message.into(),
+            class: ErrorClass::SuspendRejected,
+            code: RUNTIME_ERROR_CODE,
+            suspension: None,
         }
     }
 
     pub fn is_retryable(&self) -> bool {
         match self.class {
-            ErrorClass::Deterministic => false,
+            ErrorClass::Deterministic | ErrorClass::SuspendRejected => false,
             // plaita runner.is_retryable_error: 1001 never; 1002/1003 and
             // unknown codes retry
             ErrorClass::Transient | ErrorClass::Timeout => self.code != NODE_GEN_REQUEST_ERROR_CODE,
@@ -125,6 +162,9 @@ pub enum FlowError {
     /// on the way up. The execution state travels inside; apply a decision
     /// carrier with `SuspendedExecution::resume`.
     Suspended(Box<crate::exec::SuspendedExecution>),
+    /// 挂起作用域闸拒绝（嵌套挂起 v1：迭代帧/分支帧）。终态直抛，等价 Other
+    /// 但带专属类型——parallel 的 join 哨兵语义必须让它失败而不是吞成数据。
+    SuspendRejected { message: String },
     /// plaita `ResumeGuardError`: the resume carrier cannot be applied to the
     /// current execution state (no suspended node, non-pending status,
     /// unsupported resume type, stale subscription binding). The execution
@@ -213,6 +253,7 @@ impl fmt::Display for FlowError {
             FlowError::Suspended(suspended) => {
                 write!(f, "flow suspended at node {:?}", suspended.suspended_node)
             }
+            FlowError::SuspendRejected { message } => write!(f, "{message}"),
             FlowError::ResumeGuard { message } => write!(f, "{message}"),
             FlowError::ResumeError { message } => write!(f, "{message}"),
             FlowError::Other(m) => write!(f, "{m}"),

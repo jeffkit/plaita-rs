@@ -203,11 +203,44 @@ fn double_resume_is_a_guard_error() {
 }
 
 #[test]
-fn suspension_inside_nested_flow_is_named_rejected() {
-    // child 子流程里的挂起节点：恢复位置无法用执行状态表达 → 具名拒。
+fn suspension_inside_child_chain_parks_with_call_stack() {
+    // 嵌套挂起 v1（rs#16）：child 链内的挂起穿透到根，携带调用栈。
     let doc = r#"{"flow_id":"f","nodes":[
         {"type":"start","id":"s","next":"c"},
         {"type":"child","id":"c","next":"o","childFlow":{"nodes":[
+            {"type":"start","id":"cs","next":"ce"},
+            {"type":"event","id":"ce","event_type":"t","next":"cend"},
+            {"type":"end","id":"cend","output":"$NODE.ce","resultType":"success"}
+        ]}},
+        {"type":"end","id":"o","output":"$NODE.c","resultType":"success"}
+    ]}"#;
+    let flow = ir::load(doc.as_bytes()).unwrap();
+    let (host, _registry) = host_with_registry();
+    let suspended = suspend_of(flow.execute(&json!({}), &host));
+    assert_eq!(suspended.suspended_node, "ce");
+    assert_eq!(
+        suspended.call_stack_path(),
+        vec![("f".to_string(), "c".to_string())]
+    );
+    assert_eq!(suspended.node_state()["status"], "pending");
+    // 恢复：决策步 → 内层续跑到内层 end（调用返回）→ 父帧回填 $NODE.c → 根 end。
+    let mut payload = json!({"event_type": "t"});
+    if let Value::Object(map) = &mut payload {
+        map.insert(
+            RESUME_BINDING_KEY.to_string(),
+            suspended.node_state()["subscription_id"].clone(),
+        );
+    }
+    let out = suspended.resume(ResumeKind::Event, payload).unwrap();
+    assert_eq!(out["event_type"], "t"); // $NODE.ce（内层 end 输出）
+}
+
+#[test]
+fn suspension_inside_loop_frame_is_named_rejected() {
+    // 迭代帧（v1 不支持）：loop 体内的挂起具名拒，消息点名帧类型。
+    let doc = r#"{"flow_id":"f","nodes":[
+        {"type":"start","id":"s","next":"lp"},
+        {"type":"loop","id":"lp","collection":"$INPUT.items","next":"o","childFlow":{"nodes":[
             {"type":"start","id":"cs","next":"ce"},
             {"type":"event","id":"ce","event_type":"t","next":"cend"},
             {"type":"end","id":"cend","resultType":"success"}
@@ -216,11 +249,36 @@ fn suspension_inside_nested_flow_is_named_rejected() {
     ]}"#;
     let flow = ir::load(doc.as_bytes()).unwrap();
     let (host, _registry) = host_with_registry();
-    let err = flow.execute(&json!({}), &host).unwrap_err();
+    let err = flow.execute(&json!({"items": [1]}), &host).unwrap_err();
     let text = err.to_string();
     assert!(
-        text.contains("nested flow"),
-        "named nested-suspension rejection expected, got: {text}"
+        text.contains("loop-iteration"),
+        "named loop-frame rejection expected, got: {text}"
+    );
+}
+
+#[test]
+fn suspension_inside_parallel_branch_is_named_rejected() {
+    let doc = r#"{"flow_id":"f","nodes":[
+        {"type":"start","id":"s","next":"p"},
+        {"type":"parallel","id":"p","branches":[
+            {"name":"b1","flow":{"nodes":[
+                {"type":"start","id":"bs","next":"be"},
+                {"type":"event","id":"be","event_type":"t","next":"bend"},
+                {"type":"end","id":"bend","resultType":"success"}
+            ]}}
+        ],"joinBranches":["b1"],"next":"o"},
+        {"type":"end","id":"o","resultType":"success"}
+    ]}"#;
+    let flow = ir::load(doc.as_bytes()).unwrap();
+    let (host, _registry) = host_with_registry();
+    let err = flow.execute(&json!({}), &host).unwrap_err();
+    let text = err.to_string();
+    // 静态闸（修正清单 #4）：分支派发前同步具名拒——后台分支的动态拒绝无法
+    // 同步上抛，v1 语义 = 分支图内不允许挂起型节点。
+    assert!(
+        text.contains("contains a suspending node"),
+        "named parallel rejection expected, got: {text}"
     );
 }
 

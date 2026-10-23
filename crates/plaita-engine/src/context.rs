@@ -13,6 +13,43 @@ use std::sync::{Arc, RwLock};
 use plaita_expression::Roots;
 use serde_json::{Map, Value};
 
+/// 执行帧类型（嵌套挂起 v1 的作用域闸依据）：挂起只允许发生在
+/// Root / ChildCall / ReferenceCall 链上；任何 LoopIteration / ParallelBranch
+/// 帧上的挂起具名拒绝（其恢复位置需要迭代状态快照，v2 候选）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FrameKind {
+    #[default]
+    Root,
+    /// child 节点的子执行帧。
+    ChildCall,
+    /// reference 节点的子执行帧（隔离上下文）。
+    ReferenceCall,
+    /// loop/map/filter/find/reduce/while 的迭代体帧。
+    LoopIteration,
+    /// parallel 分支帧。
+    ParallelBranch,
+}
+
+impl FrameKind {
+    /// 该帧是否可承载挂起穿透（调用链帧）。
+    fn allows_suspension(self) -> bool {
+        matches!(
+            self,
+            FrameKind::Root | FrameKind::ChildCall | FrameKind::ReferenceCall
+        )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FrameKind::Root => "root",
+            FrameKind::ChildCall => "child",
+            FrameKind::ReferenceCall => "reference",
+            FrameKind::LoopIteration => "loop-iteration",
+            FrameKind::ParallelBranch => "parallel-branch",
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Inner {
     input: Value,
@@ -54,6 +91,8 @@ pub struct RuntimeCtx {
     /// resume path issues a FRESH budget for the continued session
     /// ([`RuntimeCtx::set_flow_deadline`]).
     pub flow_deadline: std::sync::RwLock<Option<std::time::Instant>>,
+    /// 本执行的帧类型（嵌套挂起作用域闸；snapshot 沿拷贝）。
+    frame_kind: FrameKind,
 }
 
 pub type SharedCtx = Arc<RuntimeCtx>;
@@ -64,6 +103,7 @@ impl RuntimeCtx {
             inner: RwLock::new(Inner::new()),
             parent: None,
             flow_deadline: std::sync::RwLock::new(None),
+            frame_kind: FrameKind::Root,
         }
     }
 
@@ -95,6 +135,18 @@ impl RuntimeCtx {
         flow_id: &str,
         flow: &crate::model::Flow,
         outer_deadline: Option<std::time::Instant>,
+        frame_kind: FrameKind,
+    ) -> SharedCtx {
+        Self::child_with_kind(parent, input, flow_id, flow, outer_deadline, frame_kind)
+    }
+
+    fn child_with_kind(
+        parent: &SharedCtx,
+        input: Value,
+        flow_id: &str,
+        flow: &crate::model::Flow,
+        outer_deadline: Option<std::time::Instant>,
+        frame_kind: FrameKind,
     ) -> SharedCtx {
         // 装载期（normalize_timeout）已拒掉超平台 Instant 值域的预算；这里
         // checked_add 是程序化构造 Flow 的防御面（裸加是进程级 panic）。
@@ -107,8 +159,9 @@ impl RuntimeCtx {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        RuntimeCtx::new_execution(
+        let ctx = RuntimeCtx::prepare(
             Some(parent),
+            None,
             input,
             Some(flow_id),
             flow.context
@@ -118,7 +171,9 @@ impl RuntimeCtx {
             flow.expose_env.as_ref(),
             None,
             deadline,
-        )
+            frame_kind,
+        );
+        ctx
     }
 
     /// Reference-node child context（child.py ReferenceFlow 的引用隔离）：
@@ -152,6 +207,7 @@ impl RuntimeCtx {
             flow.expose_env.as_ref(),
             None,
             deadline,
+            FrameKind::ReferenceCall,
         )
     }
 
@@ -176,6 +232,7 @@ impl RuntimeCtx {
             }),
             parent: self.parent.clone(),
             flow_deadline: std::sync::RwLock::new(self.flow_deadline()),
+            frame_kind: self.frame_kind,
         }
     }
 
@@ -210,6 +267,7 @@ impl RuntimeCtx {
             expose_env,
             host_execution_id,
             flow_deadline,
+            FrameKind::Root,
         )
     }
 
@@ -226,8 +284,10 @@ impl RuntimeCtx {
         expose_env: Option<&Vec<String>>,
         host_execution_id: Option<&str>,
         flow_deadline: Option<std::time::Instant>,
+        frame_kind: FrameKind,
     ) -> SharedCtx {
         let mut ctx = RuntimeCtx::new();
+        ctx.frame_kind = frame_kind;
         {
             let parent_inner = parent.map(|p| p.inner.read().expect("ctx lock"));
             let parent_env: Option<Value>;
@@ -385,6 +445,24 @@ impl RuntimeCtx {
     /// field access is a lock guard away).
     pub fn flow_deadline(&self) -> Option<std::time::Instant> {
         *self.flow_deadline.read().unwrap()
+    }
+
+    pub fn frame_kind(&self) -> FrameKind {
+        self.frame_kind
+    }
+
+    /// 嵌套挂起作用域闸（v1）：沿本帧到根的帧链检查——全部帧都必须可承载
+    /// 挂起穿透（Root/ChildCall/ReferenceCall）；返回第一个阻断帧的类型
+    ///（None = 允许挂起）。
+    pub fn frame_chain_blocker(&self) -> Option<FrameKind> {
+        let mut cur = Some(self);
+        while let Some(ctx) = cur {
+            if !ctx.frame_kind.allows_suspension() {
+                return Some(ctx.frame_kind);
+            }
+            cur = ctx.parent.as_deref();
+        }
+        None
     }
 
     /// A JSON snapshot of the whole context (diagnostics / tests).
