@@ -20,15 +20,37 @@
 //!    every key derivation; the Lua scripts live verbatim in `redis_impl`);
 //! 3. fail-closed + named observability (`error` carries the disposition
 //!    family; parking/acking/dead-lettering decisions are logged).
+//!
+//! The engine boundary (rs-worker-design §7.2): the worker persists "flow
+//! document reference + context snapshot + suspended node + subscription
+//! info"; recovery = `ir::load` + `RuntimeCtx::from_snapshot_json` +
+//! `SuspendedExecution::from_parts` + the engine's own `resume` chain. The
+//! worker never forks recovery logic.
 
 pub mod backend;
+pub mod checkpoint;
 pub mod config;
 pub mod error;
 pub mod fake;
+pub mod flowsource;
 pub mod keys;
+pub mod lease;
 pub mod metrics;
+pub mod queue;
+pub mod state;
 
 pub use backend::{BackendError, PendingEntry, PsubStream, RedisBackend, StreamEntry, TxOp};
+pub use checkpoint::{
+    CheckpointRecord, CheckpointStore, RedisCheckpointStore, CHECKPOINT_KIND_SUSPEND,
+    CHECKPOINT_SCHEMA_VERSION, CONTEXT_FLAVOR,
+};
 pub use config::{now_iso, Config, DEFAULT_KEY_PREFIX, SHADOW_KEY_PREFIX, TASK_SCHEMA_VERSION};
 pub use error::{ErrorKind, WorkerError, FLOW_ERROR_CODE};
+pub use flowsource::{
+    canonical_flow_definition_json, flow_definition_hash, get_flow_definition,
+    preset_flow_definition, FlowDefinition, FLOW_HASH_ALGO, LATEST_VERSION,
+};
+pub use lease::{new_holder_token, holder_instance_id, LeaseHandle};
 pub use metrics::{Metrics, NoopMetrics, METRIC_DLQ_TOTAL, METRIC_EXEC_RESULT, METRIC_QUEUE_DEPTH};
+pub use queue::{Delivery, Task, TaskQueue};
+pub use state::{ExecutionState, STATUS_SUSPENDED};
