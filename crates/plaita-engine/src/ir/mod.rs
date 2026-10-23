@@ -107,6 +107,10 @@ pub const NODE_DEPENDENCIES: &[(&str, &str)] = &[
 /// 上层 worker 可据此做 publish/start 能力门。`features` 恒空（checkpoint/
 /// hitl/suspend 的宿主侧设施不在引擎面）；`node_dependencies` 逐节点标注
 /// 挂起族的部署侧依赖（服务层/订阅存储）。
+///
+/// 键名与 plaita-go `pkg/ir.CapabilityManifest` 的 json tags 逐字对齐
+/// （`ir_contract_version` 而非 `contract_version`）：console 形状闸
+/// `MANIFEST_KEYS` 按该键名收键，旧键名会被判「无清单」走 fail-open 兜底。
 pub fn capability_manifest() -> Value {
     let mut supported: Vec<&str> = SUPPORTED_NODE_TYPES.to_vec();
     supported.sort_unstable();
@@ -121,7 +125,7 @@ pub fn capability_manifest() -> Value {
     }
     serde_json::json!({
         "engine": "plaita-rs",
-        "contract_version": CONTRACT_VERSION,
+        "ir_contract_version": CONTRACT_VERSION,
         "supported_node_types": supported,
         "unsupported_node_types": unsupported,
         "features": [],
