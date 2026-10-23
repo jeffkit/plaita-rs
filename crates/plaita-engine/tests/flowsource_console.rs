@@ -237,7 +237,7 @@ fn pull_through_on_miss_gates_hash_and_caches_locally() {
         "write-back must serve the second lookup locally, not from the console"
     );
     assert!(
-        store.get_raw("", FID, "3").is_some(),
+        matches!(store.get_raw("", FID, "3"), Ok(Some(_))),
         "write-back must land the store"
     );
 }
@@ -512,7 +512,7 @@ fn write_back_disabled_by_default() {
 
     assert!(fs.get_flow("", FID, "3").is_ok());
     assert!(
-        store.get_raw("", FID, "3").is_none(),
+        matches!(store.get_raw("", FID, "3"), Ok(None)),
         "write-back must stay off unless explicitly opted in"
     );
 }

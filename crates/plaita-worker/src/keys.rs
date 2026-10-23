@@ -9,6 +9,16 @@
 
 use crate::config::Config;
 
+/// `{prefix}:registry:flow_worker:{instance_id}` — worker registry entry
+/// (ServiceInfo JSON; SETEX TTL 30s, heartbeat 10s — §8.1, plaita-go
+/// registry.go 同形)。`{prefix}` 派生（namespace-wide 服务面）。
+pub fn registry_worker_key(cfg: &Config) -> String {
+    format!(
+        "{}:registry:flow_worker:{}",
+        cfg.key_prefix, cfg.instance_id
+    )
+}
+
 /// `{prefix}:flow:queue` — task main queue (stream).
 pub fn queue_key(cfg: &Config) -> String {
     cfg.queue_name.clone()

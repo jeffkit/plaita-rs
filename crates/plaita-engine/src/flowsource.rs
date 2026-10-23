@@ -96,19 +96,27 @@ impl FlowSourceConfig {
     /// 具名 env 装配（键面见模块文档表）。数值键严格正整数：空缺 = 缺省，
     /// 非法 = stderr 告警回缺省（r7/r8 口径：降级必须可观测，绝不静默）。
     pub fn from_env() -> Self {
-        let var = |k: &str| std::env::var(k).unwrap_or_default();
+        Self::from_getenv(|k| std::env::var(k).unwrap_or_default())
+    }
+
+    /// 可注入读取器的同型装配（worker Config 的可测 env 闭包同源；键面/
+    /// 缺省/告警口径与 [`Self::from_env`] 逐字一致）。
+    pub fn from_getenv(getenv: impl Fn(&str) -> String) -> Self {
+        let var = |k: &str| getenv(k);
         Self {
             url: var("PLAITA_CONSOLE_FLOW_SOURCE_URL"),
             api_key: var("PLAITA_CONSOLE_FLOW_SOURCE_API_KEY"),
-            timeout: Duration::from_secs(positive_int_env(
+            timeout: Duration::from_secs(positive_int_env_with(
                 "PLAITA_CONSOLE_FLOW_SOURCE_TIMEOUT_SECONDS",
                 5,
+                var,
             )),
-            negative_ttl: Duration::from_secs(positive_int_env(
+            negative_ttl: Duration::from_secs(positive_int_env_with(
                 "PLAITA_CONSOLE_FLOW_SOURCE_NEGATIVE_TTL_SECONDS",
                 30,
+                var,
             )),
-            attempts: positive_int_env("PLAITA_CONSOLE_FLOW_SOURCE_ATTEMPTS", 2) as u32,
+            attempts: positive_int_env_with("PLAITA_CONSOLE_FLOW_SOURCE_ATTEMPTS", 2, var) as u32,
             write_back: var("PLAITA_CONSOLE_FLOW_SOURCE_WRITEBACK") == "1",
             default_tenant: {
                 let v = var("PLAITA_DEFAULT_TENANT_ID");
@@ -127,11 +135,9 @@ fn parse_positive_int(raw: &str) -> Option<u64> {
     raw.trim().parse::<u64>().ok().filter(|v| *v >= 1)
 }
 
-fn positive_int_env(name: &str, default: u64) -> u64 {
-    let Ok(raw) = std::env::var(name) else {
-        return default;
-    };
-    if raw.trim().is_empty() {
+fn positive_int_env_with(name: &str, default: u64, getenv: impl Fn(&str) -> String) -> u64 {
+    let raw = getenv(name);
+    if raw.is_empty() {
         return default;
     }
     parse_positive_int(&raw).unwrap_or_else(|| {
@@ -180,12 +186,20 @@ impl std::error::Error for FlowSourceError {}
 
 /// 本地引擎存储腿（Go 侧 RedisFlowStorage 形状
 /// `{ns}:flow:{fid}:{ver}` + `{ns}:flow_versions:{fid}` 的抽象）。worker
-/// crate 落地时以 Redis 实现接入；嵌入式宿主用 [`MemoryFlowStore`]。
+/// crate 以 Redis 实现接入；嵌入式宿主用 [`MemoryFlowStore`]。读取可失败
+/// （Redis 腿的现实）：错误必须与「缺失」可区分——读失败被当成 miss 会把
+/// 「本地可能有、只是读不到」的定义错误引向 console 回源，console 也 miss
+/// 时更要终态化一个可能存在的执行。
 pub trait LocalFlowStore: Send + Sync {
-    /// 定义原文（注入后载荷；缺失 = `None`）。
-    fn get_raw(&self, tenant: &str, flow_id: &str, version: &str) -> Option<Vec<u8>>;
+    /// 定义原文（注入后载荷；缺失 = `Ok(None)`，读取失败 = `Err`）。
+    fn get_raw(
+        &self,
+        tenant: &str,
+        flow_id: &str,
+        version: &str,
+    ) -> Result<Option<Vec<u8>>, String>;
     /// 版本注册集（storage 的 flow_versions SET；空 = 无注册）。
-    fn list_versions(&self, tenant: &str, flow_id: &str) -> Vec<String>;
+    fn list_versions(&self, tenant: &str, flow_id: &str) -> Result<Vec<String>, String>;
     /// 回写（#299 §2 可选自愈）。只读实现返回 `Err`——FlowSource 告警但不
     /// 使本次装载失败（run 已解决，回写失败不得连坐）。
     fn put_raw(&self, tenant: &str, flow_id: &str, version: &str, raw: &[u8])
@@ -215,15 +229,21 @@ impl MemoryFlowStore {
 }
 
 impl LocalFlowStore for MemoryFlowStore {
-    fn get_raw(&self, tenant: &str, flow_id: &str, version: &str) -> Option<Vec<u8>> {
-        self.entries
+    fn get_raw(
+        &self,
+        tenant: &str,
+        flow_id: &str,
+        version: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .entries
             .lock()
             .unwrap()
             .get(&(tenant.to_string(), flow_id.to_string(), version.to_string()))
-            .cloned()
+            .cloned())
     }
 
-    fn list_versions(&self, tenant: &str, flow_id: &str) -> Vec<String> {
+    fn list_versions(&self, tenant: &str, flow_id: &str) -> Result<Vec<String>, String> {
         let entries = self.entries.lock().unwrap();
         let mut versions: Vec<String> = entries
             .keys()
@@ -231,7 +251,7 @@ impl LocalFlowStore for MemoryFlowStore {
             .map(|(_, _, v)| v.clone())
             .collect();
         versions.sort();
-        versions
+        Ok(versions)
     }
 
     fn put_raw(
@@ -511,9 +531,17 @@ impl FlowSource {
         version: &str,
     ) -> Result<FlowDefinition, FlowSourceError> {
         let cache_key = format!("{tenant}:{flow_id}:{version}");
-        let resolved = self.resolve_version(tenant, flow_id, version);
-        if let Some(raw) = self.store.get_raw(tenant, flow_id, &resolved) {
-            return self.load_local(flow_id, &resolved, raw);
+        let resolved = self.resolve_version(tenant, flow_id, version)?;
+        match self.store.get_raw(tenant, flow_id, &resolved) {
+            Ok(Some(raw)) => return self.load_local(flow_id, &resolved, raw),
+            Ok(None) => {}
+            // 本地存储读失败：瞬态（重投可愈），绝不当成 miss 引去回源、
+            // 更不进负缓存——本地可能存在，只是此刻读不到。
+            Err(e) => {
+                return Err(FlowSourceError::Transient(format!(
+                    "local flow store read ({flow_id}:{resolved}): {e}"
+                )))
+            }
         }
         self.pull_through(tenant, flow_id, &resolved, &cache_key)
     }
@@ -521,20 +549,27 @@ impl FlowSource {
     /// 空 version 规则（storage/redis.py:764-782 口径）：prefer 字面
     /// `latest` 成员，否则数值最大版本；注册集为空 → `latest` 哨兵交由
     /// console 侧解析。
-    fn resolve_version(&self, tenant: &str, flow_id: &str, version: &str) -> String {
+    fn resolve_version(
+        &self,
+        tenant: &str,
+        flow_id: &str,
+        version: &str,
+    ) -> Result<String, FlowSourceError> {
         if !version.is_empty() {
-            return version.to_string();
+            return Ok(version.to_string());
         }
-        let versions = self.store.list_versions(tenant, flow_id);
+        let mut versions = self
+            .store
+            .list_versions(tenant, flow_id)
+            .map_err(|e| FlowSourceError::Transient(format!("flow versions set: {e}")))?;
         if versions.is_empty() || versions.iter().any(|v| v == LATEST_VERSION) {
-            return LATEST_VERSION.to_string();
+            return Ok(LATEST_VERSION.to_string());
         }
-        let mut versions = versions;
         versions.sort_by(|a, b| numeric_version_cmp(a, b));
-        versions
+        Ok(versions
             .last()
             .cloned()
-            .unwrap_or_else(|| LATEST_VERSION.to_string())
+            .unwrap_or_else(|| LATEST_VERSION.to_string()))
     }
 
     /// 本地直读路径（Go Redis 命中分支同构）：指纹先算（瞬态域），装载拒

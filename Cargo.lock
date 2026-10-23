@@ -677,6 +677,7 @@ dependencies = [
  "sha2",
  "signal-hook",
  "thiserror",
+ "url",
  "uuid",
 ]
 

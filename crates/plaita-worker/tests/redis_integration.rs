@@ -9,7 +9,11 @@
 //! 需要 `PLAITA_RS_REDIS_TESTS=1` + 可达的 `PLAITA_RS_REDIS_URL`（缺省
 //! redis://127.0.0.1:6379/0）。所有键落在按 PID 一次性化的前缀下，跑完即清。
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use plaita_worker::config::now_iso;
 use plaita_worker::keys;
@@ -49,12 +53,18 @@ struct Env {
 
 impl Env {
     fn setup(test_name: &str) -> Env {
-        let Some((backend, cfg)) = integration_backend(test_name) else {
+        Self::setup_with(test_name, &|_| {})
+    }
+
+    /// `tweak` 在 Worker::new 前改 Config（flow_source URL / 心跳间隔等）。
+    fn setup_with(test_name: &str, tweak: &dyn Fn(&mut plaita_worker::Config)) -> Env {
+        let Some((backend, mut cfg)) = integration_backend(test_name) else {
             panic!(
                 "integration leg disabled: set PLAITA_RS_REDIS_TESTS=1 \
                  (and optionally PLAITA_RS_REDIS_URL)"
             );
         };
+        tweak(&mut cfg);
         let worker = Worker::new(
             backend.clone() as Arc<dyn plaita_worker::RedisBackend>,
             cfg.clone(),
@@ -342,4 +352,456 @@ fn real_redis_pubsub_bridge_delivers_and_skips_timeline() {
 
     stop.store(true, Ordering::SeqCst);
     bridge_thread.join().unwrap();
+}
+
+// ---------------------------------------------------------------- 第十五轮接线腿
+//
+// B4 第十五轮（读穿透 × registry 入位）的真 Redis 形制，对齐上面 4 例：
+// 内存 fake 已钉的负控格在此逐格实弹。console 臂用自宿主 TCP stub
+// （r8 教训①：先读全请求再应答）。
+
+/// 可变路由的假 console（同 readthrough_e2e.rs 形制；hash 拒格腿要运行期
+/// 换定义）。
+struct ItStub {
+    url: String,
+    hits: Arc<AtomicUsize>,
+    routes: Arc<Mutex<HashMap<String, (u16, String)>>>,
+}
+
+impl ItStub {
+    fn new(routes: Vec<(&'static str, u16, String)>) -> ItStub {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let route_map: Arc<Mutex<HashMap<String, (u16, String)>>> = Arc::new(Mutex::new(
+            routes
+                .into_iter()
+                .map(|(p, s, b)| (p.to_string(), (s, b)))
+                .collect(),
+        ));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_t = hits.clone();
+        let routes_t = route_map.clone();
+        std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(stream) = incoming else { continue };
+                let hits = hits_t.clone();
+                let routes = routes_t.clone();
+                std::thread::spawn(move || it_handle_conn(stream, hits, routes));
+            }
+        });
+        ItStub {
+            url,
+            hits,
+            routes: route_map,
+        }
+    }
+
+    fn set_body(&self, path: &str, body: String) {
+        self.routes
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), (200, body));
+    }
+
+    fn hit_count(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+}
+
+fn it_handle_conn(
+    mut stream: TcpStream,
+    hits: Arc<AtomicUsize>,
+    routes: Arc<Mutex<HashMap<String, (u16, String)>>>,
+) {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut tmp).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let request_line = text.split("\r\n").next().unwrap_or("");
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_string();
+    hits.fetch_add(1, Ordering::SeqCst);
+    let (status, reason, body) = match routes.lock().unwrap().get(&path) {
+        Some((s, b)) => (*s, "OK", b.clone()),
+        None => (404, "Not Found", "{}".to_string()),
+    };
+    let resp = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: \
+         {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.flush();
+}
+
+const FID_RT: &str = "wf-it-rt";
+
+fn it_version_detail(status: &str, definition: &str) -> String {
+    json!({
+        "flow_id": FID_RT,
+        "version": "v1",
+        "status": status,
+        "definition": definition,
+    })
+    .to_string()
+}
+
+fn it_flow_detail() -> String {
+    json!({
+        "versions": [{
+            "version": "v1",
+            "status": "published",
+            "published_at": "2026-10-23T00:00:00",
+            "created_at": "2026-10-23T00:00:00",
+        }],
+    })
+    .to_string()
+}
+
+const EVENT_FLOW_MODIFIED: &str = r#"{"flow_id":"wf1","nodes":[
+    {"type":"start","id":"s","next":"e1"},
+    {"type":"event","id":"e1","event_type":"tick","next":"mid"},
+    {"type":"assignment","id":"mid","output":{"seen":"CHANGED","where":"$NODE.e1.status"},"next":"end"},
+    {"type":"end","id":"end","output":"$NODE.mid","resultType":"success"}
+]}"#;
+
+/// 腿 5（读穿透全链）：本地零定义 → start 载体 → console latest 解析 +
+/// published 装载（r11 hash 门同路径）→ 挂起 → 注入事件 → 恢复完成。
+#[test]
+#[ignore = "real-Redis leg: run with PLAITA_RS_REDIS_TESTS=1 cargo test -- --ignored"]
+fn real_redis_readthrough_local_miss_pull_through_full_chain() {
+    let stub = ItStub::new(vec![
+        ("/api/flows/wf-it-rt", 200, it_flow_detail()),
+        (
+            "/api/flows/wf-it-rt/versions/v1",
+            200,
+            it_version_detail("published", EVENT_FLOW),
+        ),
+    ]);
+    let env = Env::setup_with("rtchain", &|cfg| {
+        cfg.flow_source.url = stub.url.clone();
+    });
+    let backend = env.dyn_backend();
+    // 本地腿零定义：定义只存在于 console
+    env.queue
+        .enqueue(
+            &json!({
+                "type": "start",
+                "flow_id": FID_RT,
+                "execution_id": "it-rt-1",
+                "params": {"who": "rt"},
+                "timestamp": now_iso(),
+            }),
+            1,
+        )
+        .unwrap();
+    env.worker.process_one().unwrap();
+
+    let row = state::load(backend.as_ref(), &env.cfg, "", "it-rt-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.status,
+        state::STATUS_SUSPENDED,
+        "definition came from console"
+    );
+    assert!(!row.flow_hash.is_empty());
+    assert_eq!(row.flow_hash_algo, "flow-definition-json-sortkeys-v2-rust");
+    let hits_after_start = stub.hit_count();
+    assert!(
+        hits_after_start >= 2,
+        "latest + detail (got {hits_after_start})"
+    );
+
+    events::handle_event(
+        &backend,
+        &env.cfg,
+        &env.queue,
+        &env.subs,
+        &events::Event {
+            event_id: "it-rt-evt-1".into(),
+            event_type: "tick".into(),
+            correlation_id: "it-rt-1".into(),
+            tenant_id: String::new(),
+            data: json!({"status": "completed"}),
+        },
+    )
+    .unwrap();
+    env.worker.process_one().unwrap();
+    let row = state::load(backend.as_ref(), &env.cfg, "", "it-rt-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, state::STATUS_COMPLETED);
+    assert_eq!(row.context["nodes"]["mid"]["seen"], "completed");
+}
+
+/// 腿 6：console 404 → 具名确定性终态 + 负缓存——第二条载体零 console
+/// 调用（真 Redis 上无 TTL 边界抖动窗口）。
+#[test]
+#[ignore = "real-Redis leg: run with PLAITA_RS_REDIS_TESTS=1 cargo test -- --ignored"]
+fn real_redis_console_404_negative_caches_named_terminal() {
+    let stub = ItStub::new(vec![]);
+    let env = Env::setup_with("rt404", &|cfg| {
+        cfg.flow_source.url = stub.url.clone();
+    });
+    let backend = env.dyn_backend();
+    for exec in ["it-rt-n1", "it-rt-n2"] {
+        env.queue
+            .enqueue(
+                &json!({
+                    "type": "start",
+                    "flow_id": FID_RT,
+                    "execution_id": exec,
+                    "params": {},
+                    "timestamp": now_iso(),
+                }),
+                1,
+            )
+            .unwrap();
+        env.worker.process_one().unwrap();
+        let row = state::load(backend.as_ref(), &env.cfg, "", exec)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, state::STATUS_ERROR);
+        assert_eq!(row.error.unwrap()["error_type"], "flow_not_found");
+    }
+    assert_eq!(
+        stub.hit_count(),
+        1,
+        "second carrier served from the negative cache (latest call only)"
+    );
+}
+
+/// 腿 7：未配置 URL = 特性关闭——本地 miss 即具名确定性终态，零 HTTP 面
+/// （连 stub 都不存在；消息不得谎称查过 console）。
+#[test]
+#[ignore = "real-Redis leg: run with PLAITA_RS_REDIS_TESTS=1 cargo test -- --ignored"]
+fn real_redis_unconfigured_local_semantics() {
+    let env = Env::setup("rtnone");
+    let backend = env.dyn_backend();
+    env.queue
+        .enqueue(
+            &json!({
+                "type": "start",
+                "flow_id": FID_RT,
+                "execution_id": "it-rt-u1",
+                "params": {},
+                "timestamp": now_iso(),
+            }),
+            1,
+        )
+        .unwrap();
+    env.worker.process_one().unwrap();
+    let row = state::load(backend.as_ref(), &env.cfg, "", "it-rt-u1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, state::STATUS_ERROR);
+    let err = row.error.unwrap();
+    assert_eq!(err["error_type"], "flow_not_found");
+    let msg = err["message"].as_str().unwrap();
+    assert!(msg.contains("flow definition unavailable"), "got: {msg}");
+    assert!(!msg.contains("console"), "got: {msg}");
+}
+
+/// 腿 8：消费侧 hash 拒格（真 Redis × console 源）：挂起后 console 同版本
+/// 换定义 → resume 指纹硬闸具名终态 flow_hash_mismatch；allow 流标放行臂
+/// 落 COMPLETED 且吃到变更后输出。
+#[test]
+#[ignore = "real-Redis leg: run with PLAITA_RS_REDIS_TESTS=1 cargo test -- --ignored"]
+fn real_redis_hash_mismatch_named_rejection_on_console_source() {
+    let stub = ItStub::new(vec![
+        ("/api/flows/wf-it-rt", 200, it_flow_detail()),
+        (
+            "/api/flows/wf-it-rt/versions/v1",
+            200,
+            it_version_detail("published", EVENT_FLOW),
+        ),
+    ]);
+    let env = Env::setup_with("rthash", &|cfg| {
+        cfg.flow_source.url = stub.url.clone();
+    });
+    let backend = env.dyn_backend();
+
+    // 腿 1：拒绝
+    env.queue
+        .enqueue(
+            &json!({
+                "type": "start",
+                "flow_id": FID_RT,
+                "execution_id": "it-rt-h1",
+                "params": {},
+                "timestamp": now_iso(),
+            }),
+            1,
+        )
+        .unwrap();
+    env.worker.process_one().unwrap();
+    let row = state::load(backend.as_ref(), &env.cfg, "", "it-rt-h1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, state::STATUS_SUSPENDED);
+    let cp = checkpoint::load(backend.as_ref(), &env.cfg, "", "it-rt-h1")
+        .unwrap()
+        .expect("checkpoint exists");
+    let sub_id = cp.context["nodes"]["e1"]["subscription_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    stub.set_body(
+        "/api/flows/wf-it-rt/versions/v1",
+        it_version_detail("published", EVENT_FLOW_MODIFIED),
+    );
+    env.queue
+        .enqueue(
+            &json!({
+                "type": "resume",
+                "flow_id": FID_RT,
+                "execution_id": "it-rt-h1",
+                "resume_type": "event",
+                "timestamp": now_iso(),
+                "data": {"subscription_id": sub_id, "status": "completed"},
+            }),
+            1,
+        )
+        .unwrap();
+    env.worker.process_one().unwrap();
+    let row = state::load(backend.as_ref(), &env.cfg, "", "it-rt-h1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, state::STATUS_ERROR);
+    assert_eq!(row.error.unwrap()["error_type"], "flow_hash_mismatch");
+
+    // 腿 2：allow_flow_hash_change 放行（新执行，吃到 CHANGED 输出）
+    env.queue
+        .enqueue(
+            &json!({
+                "type": "start",
+                "flow_id": FID_RT,
+                "execution_id": "it-rt-h2",
+                "params": {},
+                "timestamp": now_iso(),
+            }),
+            1,
+        )
+        .unwrap();
+    env.worker.process_one().unwrap();
+    let cp = checkpoint::load(backend.as_ref(), &env.cfg, "", "it-rt-h2")
+        .unwrap()
+        .expect("checkpoint exists");
+    let sub_id2 = cp.context["nodes"]["e1"]["subscription_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    env.queue
+        .enqueue(
+            &json!({
+                "type": "resume",
+                "flow_id": FID_RT,
+                "execution_id": "it-rt-h2",
+                "resume_type": "event",
+                "timestamp": now_iso(),
+                "data": {
+                    "subscription_id": sub_id2,
+                    "allow_flow_hash_change": true,
+                    "status": "completed",
+                },
+            }),
+            1,
+        )
+        .unwrap();
+    env.worker.process_one().unwrap();
+    let row = state::load(backend.as_ref(), &env.cfg, "", "it-rt-h2")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, state::STATUS_COMPLETED);
+    assert_eq!(row.context["nodes"]["mid"]["seen"], "CHANGED");
+}
+
+/// 腿 9：registry 全生命周期实弹（#82 写入格）——run() 起真心跳（1s 拍）
+/// → 注册键在册：ServiceInfo 顶层 + metadata.engine + capability_manifest
+/// 五键（dict 形态、ir_contract_version 与引擎同源、supported 白名单全
+/// 等）→ drain → stopped 墓碑 + 键删除。
+#[test]
+#[ignore = "real-Redis leg: run with PLAITA_RS_REDIS_TESTS=1 cargo test -- --ignored"]
+fn real_redis_registry_lifecycle_manifest_five_keys() {
+    let env = Env::setup_with("registry", &|cfg| {
+        cfg.heartbeat_interval_secs = 1;
+    });
+    let backend = env.dyn_backend();
+    // Env.worker 不动（Drop 边界）；另起一个同配置的 Worker 跑完整生命周期。
+    let run_worker = Arc::new(Worker::new(
+        backend.clone(),
+        env.cfg.clone(),
+        Arc::new(NoopMetrics),
+    ));
+    let handle = {
+        let w = run_worker.clone();
+        std::thread::spawn(move || w.run())
+    };
+
+    // 注册键出现（starting → running 心跳在写）
+    let key = keys::registry_worker_key(&env.cfg);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut raw = None;
+    while std::time::Instant::now() < deadline {
+        if let Some(v) = backend.get(&key).unwrap() {
+            raw = Some(v);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let raw = raw.expect("registry entry must appear once run() is up");
+    let info: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(info["service_type"], "flow_worker");
+    assert_eq!(info["instance_id"], env.cfg.instance_id);
+    assert_eq!(info["status"], "running");
+    let meta = &info["metadata"];
+    assert_eq!(meta["engine"], "plaita-rs");
+    assert_eq!(meta["queue_name"], env.cfg.queue_name);
+    let manifest = &meta["capability_manifest"];
+    assert!(manifest.is_object(), "manifest must ride as a nested dict");
+    for k in [
+        "engine",
+        "ir_contract_version",
+        "supported_node_types",
+        "unsupported_node_types",
+        "features",
+    ] {
+        assert!(manifest.get(k).is_some(), "manifest key {k} missing");
+    }
+    assert_eq!(
+        manifest["ir_contract_version"],
+        plaita_engine::ir::CONTRACT_VERSION
+    );
+    // 清单与引擎白名单同源全等（accept-list 自动生成不变量）
+    let engine_manifest = plaita_engine::ir::capability_manifest();
+    assert_eq!(
+        manifest["supported_node_types"], engine_manifest["supported_node_types"],
+        "supported list mirrors the engine accept-list exactly"
+    );
+    assert_eq!(
+        manifest["unsupported_node_types"],
+        engine_manifest["unsupported_node_types"]
+    );
+
+    // drain → 停机序列：心跳线程 join 后墓碑+DEL，键消失
+    run_worker.request_drain("test-complete");
+    handle.join().unwrap().expect("run() clean exit");
+    assert!(
+        backend.get(&key).unwrap().is_none(),
+        "shutdown tombstone+DEL removes the registry key"
+    );
 }

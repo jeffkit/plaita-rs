@@ -28,3 +28,6 @@ redis = { version = "0.27", default-features = false, features = [
 ] }
 # SIGTERM/SIGINT → drain (D3); sync-friendly signal delivery for the bin.
 signal-hook = "0.3"
+# registry metadata: redis_url host/port/db parse + password masking
+# (plaita-go registry.go 同款；engine 亦依赖 url=2，不新增锁图面)。
+url = "2"
