@@ -128,6 +128,13 @@ Rust-only `code`（Python 刻意 opt-in 注册）。负控双实证：权威清�
 
 **范围（Go checkpoint v1.5 同款，fail-closed）**：只有**根流程**可以挂起——嵌套
 child/loop/parallel 里的挂起点具名拒绝（其恢复位置无法用执行状态表达）。
+**Python 权威侧实弹核实（2026-10-23 探针）**：plaita 自己也**没有**嵌套挂起——
+`_prepare_strategy` 对子执行（run_compatible）恒选 NORMAL/GENERATOR、永不选
+DISTRIBUTED，`is_suspending` 只在分布式逐步边界的当前节点上生效；child 内的
+event 节点在 NORMAL 与 DISTRIBUTED 两模式下都把 pending 载荷当**普通数据**
+返回、内层流程照常走完——事件永不消费、订阅永不注册、零报错（fail-open 的
+静默误执行）。本引擎的具名拒绝是把该缺陷 fail-closed 化，不是功能缺失；真要
+支持嵌套挂起需三家共同立项（挂起传播 + checkpoint 表达内层路径 + 沿路径恢复）。
 
 **引擎面**：挂起节点 execute 产出 `status:"pending"` 契约（extended 家族 =
 {event_type, event_filter, is_async, event_id, service_config, node_subtype}；
