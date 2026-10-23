@@ -13,10 +13,12 @@ use crate::config::Config;
 /// (ServiceInfo JSON; SETEX TTL 30s, heartbeat 10s — §8.1, plaita-go
 /// registry.go 同形)。`{prefix}` 派生（namespace-wide 服务面）。
 pub fn registry_worker_key(cfg: &Config) -> String {
-    format!(
-        "{}:registry:flow_worker:{}",
-        cfg.key_prefix, cfg.instance_id
-    )
+    registry_worker_key_of(cfg, &cfg.instance_id)
+}
+
+/// 同上，但实例 id 由调用方给出（LookupStatus 查询面读他实例的注册键）。
+pub fn registry_worker_key_of(cfg: &Config, instance_id: &str) -> String {
+    format!("{}:registry:flow_worker:{}", cfg.key_prefix, instance_id)
 }
 
 /// `{prefix}:flow:queue` — task main queue (stream).

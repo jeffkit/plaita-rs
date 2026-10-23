@@ -1253,10 +1253,11 @@ impl Worker {
         Ok(())
     }
 
-    /// §5.3 conflict disposition, M1 posture (no registry yet): decision
-    /// carriers are NEVER acked in the conflict window; all other carriers
-    /// park conservatively too (no live-holder proof source in M1 — the
-    /// registry's LookupStatus ack branch is M2).
+    /// §5.3 conflict disposition (M2, registry live): decision carriers are
+    /// NEVER acked in the conflict window; all other carriers ack only when
+    /// the holder's registry entry proves a LIVE RUNNING worker (worker.go
+    /// leaseConflictDisposition:1725-1753). Every probe failure parks
+    /// conservatively (fail-closed).
     fn lease_conflict_disposition(&self, task: &Task) -> Result<(), WorkerError> {
         if task.suspended_resume_chain {
             eprintln!(
@@ -1264,19 +1265,76 @@ impl Worker {
                  (execution_id={}, resume_type={})",
                 task.execution_id, task.resume_type
             );
-        } else {
-            eprintln!(
-                "[worker] lease conflict, leaving pending (execution_id={}, type={})",
-                task.execution_id, task.task_type
-            );
+            return Err(WorkerError::new(
+                ErrorKind::LeaseConflict,
+                format!(
+                    "execution lease held by another worker ({})",
+                    task.execution_id
+                ),
+            ));
         }
-        Err(WorkerError::new(
+        let holder = lease::get_holder(
+            self.backend.as_ref(),
+            &self.cfg,
+            &task.tenant_id,
+            &task.execution_id,
+        )?;
+        let Some(holder) = holder else {
+            // The lease vanished between acquire and probe: leave pending,
+            // the next reclaim pass takes it cleanly.
+            eprintln!(
+                "[worker] lease vanished during conflict check, leaving pending \
+                 (execution_id={})",
+                task.execution_id
+            );
+            return Err(self.lease_conflict_error(task));
+        };
+        let Some(instance_id) = lease::holder_instance_id(&holder) else {
+            eprintln!(
+                "[worker] lease holder unparsable, leaving pending (execution_id={}, \
+                 holder={holder:?})",
+                task.execution_id
+            );
+            return Err(self.lease_conflict_error(task));
+        };
+        let status = self.registry.lookup_status(&instance_id)?;
+        if status.as_deref() == Some(registry::REG_STATUS_RUNNING) {
+            // Live holder: ack to avoid burning deliveries against a busy
+            // execution (§5.3 point 4).
+            eprintln!(
+                "[worker] lease held by live worker, acking message (execution_id={}, \
+                 holder={instance_id})",
+                task.execution_id
+            );
+            if task.task_type == "resume" {
+                // plaita#53: an acked resume means THIS resumption did not
+                // take effect — say so, or operators read the silence as
+                // success.
+                eprintln!(
+                    "[worker] resume carrier acked while a live holder owns the lease — \
+                     this resume had no effect (execution_id={}, resume_type={}, \
+                     holder={instance_id})",
+                    task.execution_id, task.resume_type
+                );
+            }
+            return Ok(());
+        }
+        eprintln!(
+            "[worker] lease holder not running, leaving pending (execution_id={}, \
+             holder={instance_id}, status={:?})",
+            task.execution_id, status
+        );
+        Err(self.lease_conflict_error(task))
+    }
+
+    fn lease_conflict_error(&self, task: &Task) -> WorkerError {
+        WorkerError::new(
             ErrorKind::LeaseConflict,
             format!(
                 "execution lease held by another worker ({})",
                 task.execution_id
             ),
-        ))
+        )
     }
 
     /// The §9.2 wake-up: flow gates → checkpoint load → rebuild → resume →
