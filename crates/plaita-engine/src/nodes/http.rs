@@ -214,6 +214,7 @@ pub(crate) fn execute_http(
                 message: format!("http node: {e}"),
                 class: crate::error::ErrorClass::Transient,
                 code: crate::error::NODE_DO_REQUEST_ERROR_CODE,
+                suspension: None,
             });
         }
     };

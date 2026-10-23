@@ -15,8 +15,8 @@ pub(crate) use suspend::{resume_node_body, suspend_spec};
 
 use serde_json::{json, Value};
 
-use crate::context::{RuntimeCtx, SharedCtx};
-use crate::error::NodeError;
+use crate::context::{FrameKind, RuntimeCtx, SharedCtx};
+use crate::error::{FlowError, NodeError};
 use crate::exec::Host;
 use crate::model::{Collection, Flow, Node, NodeKind};
 use std::time::Instant;
@@ -405,6 +405,12 @@ pub(crate) fn validate_output_pub(node: &Node, what: &str, value: &Value) -> Res
     validate_output(node, what, value)
 }
 
+/// 恢复「返回步」的子节点输出校验（execute_child/execute_reference 完成路径
+/// 的同款闸，供 exec::resume 的调用帧回填使用）。
+pub(crate) fn validate_child_return_output(node: &Node, value: &Value) -> Result<(), NodeError> {
+    validate_output(node, "child output", value)
+}
+
 fn validate_output(node: &Node, what: &str, value: &Value) -> Result<(), NodeError> {
     match &node.output_type {
         Some(p) => p.validate_value(value).map_err(|e| {
@@ -439,6 +445,7 @@ fn execute_end(
                 message: format!("FlowResultError: code={code}, message={message}"),
                 class: crate::error::ErrorClass::Deterministic,
                 code: crate::error::RUNTIME_ERROR_CODE,
+                suspension: None,
             })
         }
         // success（含未知值的默认归一，对齐 Python setup_end）：求值并校验
@@ -655,7 +662,14 @@ fn run_collection_child(
     host: &Host,
     deadline: Option<Instant>,
 ) -> Result<Value, NodeError> {
-    let child_rc = RuntimeCtx::child(rc, input.clone(), &child_flow.id, child_flow, deadline);
+    let child_rc = RuntimeCtx::child(
+        rc,
+        input.clone(),
+        &child_flow.id,
+        child_flow,
+        deadline,
+        FrameKind::LoopIteration,
+    );
     child_flow
         .execute_on(&child_rc, host, &input)
         .map_err(|e| NodeError::transient(e.to_string()))
@@ -1021,14 +1035,17 @@ fn execute_reference(
     }
     let child_rc =
         RuntimeCtx::child_isolated(rc, input.clone(), &child_flow.id, child_flow, deadline);
-    let result = child_flow
-        .execute_on(&child_rc, host, &input)
-        .map_err(|e| {
-            NodeError::transient(format!(
+    let result = match child_flow.execute_on(&child_rc, host, &input) {
+        Ok(v) => v,
+        // 嵌套挂起穿透（v1）：reference 链同 child。
+        Err(FlowError::Suspended(inner)) => return Err(NodeError::suspension(inner)),
+        Err(e) => {
+            return Err(NodeError::transient(format!(
                 "failed to exec children workflow ({:?}) : {e}",
                 child_flow.id
-            ))
-        })?;
+            )))
+        }
+    };
     validate_output(node, "reference output", &result)?;
     Ok(StepOutcome {
         result,
@@ -1063,15 +1080,25 @@ fn execute_child(
             ))
         })?;
     }
-    let child_rc = RuntimeCtx::child(rc, input.clone(), &child_flow.id, child_flow, deadline);
-    let result = child_flow
-        .execute_on(&child_rc, host, &input)
-        .map_err(|e| {
-            NodeError::transient(format!(
+    let child_rc = RuntimeCtx::child(
+        rc,
+        input.clone(),
+        &child_flow.id,
+        child_flow,
+        deadline,
+        FrameKind::ChildCall,
+    );
+    let result = match child_flow.execute_on(&child_rc, host, &input) {
+        Ok(v) => v,
+        // 嵌套挂起穿透（v1）：内层挂起原样上抛，不进任何策略链。
+        Err(FlowError::Suspended(inner)) => return Err(NodeError::suspension(inner)),
+        Err(e) => {
+            return Err(NodeError::transient(format!(
                 "failed to exec children workflow ({:?}) : {e}",
                 child_flow.id
-            ))
-        })?;
+            )))
+        }
+    };
     validate_output(node, "child output", &result)?;
     Ok(StepOutcome {
         result,
@@ -1240,6 +1267,7 @@ fn execute_parallel(
                 Ok(v) => {
                     results.insert(b.branch.name.clone(), v);
                 }
+                Err(ne) if ne.class == crate::error::ErrorClass::SuspendRejected => return Err(ne),
                 Err(err) => {
                     eprintln!(
                         "parallel node {:?} join branch {:?} failed (inline), result set to the error sentinel: {err}",
@@ -1290,7 +1318,7 @@ fn execute_parallel(
     // sentinel (concurrent.py _process_future_result).
     let mut results = serde_json::Map::new();
     if !join.is_empty() {
-        let outcomes: Vec<Result<Value, String>> = std::thread::scope(|scope| {
+        let outcomes: Vec<Result<Value, NodeError>> = std::thread::scope(|scope| {
             let handles: Vec<_> = join
                 .iter()
                 .map(|b| {
@@ -1304,8 +1332,8 @@ fn execute_parallel(
                 .into_iter()
                 .map(|h| match h.join() {
                     Ok(Ok(v)) => Ok(v),
-                    Ok(Err(e)) => Err(e.to_string()),
-                    Err(_) => Err("branch thread panicked".to_string()),
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => Err(NodeError::transient("branch thread panicked".to_string())),
                 })
                 .collect()
         });
@@ -1314,6 +1342,10 @@ fn execute_parallel(
                 Ok(v) => {
                     results.insert(b.branch.name.clone(), v);
                 }
+                // 分支内挂起被闸拒绝（SuspendRejected）：整个 parallel 节点
+                // 失败并上抛，不落错误哨兵——哨兵会让流程带着未消费的挂起
+                // 继续走（fail-open）。
+                Err(ne) if ne.class == crate::error::ErrorClass::SuspendRejected => return Err(ne),
                 Err(err) => {
                     eprintln!(
                         "parallel node {:?} join branch {:?} failed, result set to the error sentinel: {err}",
@@ -1322,7 +1354,7 @@ fn execute_parallel(
                     results.insert(
                         b.branch.name.clone(),
                         json!({
-                            "__parallel_error__": err,
+                            "__parallel_error__": err.to_string(),
                             "__branch__": b.branch.name,
                         }),
                     );
@@ -1364,7 +1396,19 @@ fn run_branch_flow(
             .cloned()
             .unwrap_or(Value::Null),
     };
-    let branch_rc = RuntimeCtx::child(base_rc, input.clone(), &flow.id, flow, deadline);
-    flow.execute_on(&branch_rc, host, &input)
-        .map_err(|e| NodeError::transient(e.to_string()))
+    let branch_rc = RuntimeCtx::child(
+        base_rc,
+        input.clone(),
+        &flow.id,
+        flow,
+        deadline,
+        FrameKind::ParallelBranch,
+    );
+    match flow.execute_on(&branch_rc, host, &input) {
+        Ok(v) => Ok(v),
+        // 分支内挂起已被作用域闸具名拒绝（parallel-branch 帧）——专属类型
+        // 上抛，不得被哨兵/日志吞掉（fail-closed）。
+        Err(FlowError::SuspendRejected { message }) => Err(NodeError::suspend_rejected(message)),
+        Err(e) => Err(NodeError::transient(e.to_string())),
+    }
 }
