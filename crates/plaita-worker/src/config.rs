@@ -111,6 +111,21 @@ pub struct Config {
     /// PLAITA_TASK_MAX_AGE_SECONDS（#29，默认 30 天）——载体年龄闸地平线；
     /// 0/未设回默认，负值=整闸关闭（agegate.rs）。
     pub task_max_age_secs: i64,
+    /// PLAITA_EVENT_RECONCILE_INTERVAL（§8.2 回扫器，默认 300s）——事件存储
+    /// 对账周期；非法/≤0 回默认 + 具名 WARNING（0 是紧环不是「关闭」，关闸
+    /// 走 PLAITA_DISABLE_EVENT_RECONCILE=1；Python B2R31-03 同口径）。
+    pub event_reconcile_interval_secs: f64,
+    /// PLAITA_EVENT_RECONCILE_BACKFILL（默认 3600s）——启动/游标丢失时的
+    /// 回扫窗口；负值按 0（只扫当轮）。
+    pub event_reconcile_backfill_secs: f64,
+    /// PLAITA_DISABLE_EVENT_RECONCILE=1 ——回扫器回滚开关（整面旁路）。
+    pub disable_event_reconcile: bool,
+    /// PLAITA_EVENT_STORAGE_PREFIX（默认 `plaita:event:`）——业务事件存储
+    /// 键前缀（Python 发布端 store_event_sync 的 `key_prefix`：记录
+    /// `{esp}events:{id}` + 类型索引 `{esp}types:{type}`）。这是**发布方的
+    /// 存储**命名空间，不从 worker KeyPrefix 派生；apply_shadow 在等于默认
+    /// 值时改写（影子部署绝不回扫生产事件存储）。
+    pub event_storage_prefix: String,
 }
 
 impl Default for Config {
@@ -156,6 +171,10 @@ impl Config {
             quota_defer_max: env_i64(&getenv, "PLAITA_TENANT_QUOTA_DEFER_MAX", 64),
             disable_tenant_quota: getenv("PLAITA_DISABLE_TENANT_QUOTA") == "1",
             task_max_age_secs: env_i64(&getenv, "PLAITA_TASK_MAX_AGE_SECONDS", 30 * 86_400),
+            event_reconcile_interval_secs: env_reconcile_interval(&getenv),
+            event_reconcile_backfill_secs: env_reconcile_backfill(&getenv),
+            disable_event_reconcile: getenv("PLAITA_DISABLE_EVENT_RECONCILE") == "1",
+            event_storage_prefix: getenv("PLAITA_EVENT_STORAGE_PREFIX"),
             flow_source: plaita_engine::flowsource::FlowSourceConfig::from_getenv(&getenv),
         };
         cfg.normalize();
@@ -247,6 +266,9 @@ impl Config {
         if self.task_max_age_secs == 0 {
             self.task_max_age_secs = 30 * 86_400;
         }
+        if self.event_storage_prefix.is_empty() {
+            self.event_storage_prefix = DEFAULT_EVENT_STORAGE_PREFIX.to_string();
+        }
         // execution_deadline_secs: env 解析已按「非法/≤0 回默认 + WARNING」
         // 处理；这里只兜结构体直构的 NaN。
         if self.execution_deadline_secs.is_nan() {
@@ -269,6 +291,11 @@ impl Config {
     /// back to production naming.
     pub fn apply_shadow(&mut self) {
         self.key_prefix = SHADOW_KEY_PREFIX.to_string();
+        // 事件存储前缀：等于默认（未显式配置）时改写——影子部署的回扫器
+        // 绝不消费生产事件存储；显式配置的覆盖保持调用方意图。
+        if self.event_storage_prefix == DEFAULT_EVENT_STORAGE_PREFIX {
+            self.event_storage_prefix = SHADOW_EVENT_STORAGE_PREFIX.to_string();
+        }
         let default_queue = format!("{DEFAULT_KEY_PREFIX}:flow:queue");
         let shadow_queue = format!("{SHADOW_KEY_PREFIX}:flow:queue");
         if self.queue_name == default_queue || self.queue_name == shadow_queue {
@@ -317,6 +344,58 @@ fn env_f64(getenv: &impl Fn(&str) -> String, key: &str, default: f64) -> f64 {
 /// engine's budget layer uses — the double layer composes to the stricter
 /// one naturally).
 pub const DEFAULT_EXECUTION_DEADLINE_SECS: f64 = 1800.0;
+
+/// 业务事件存储默认键前缀（Python `DEFAULT_EVENT_KEY_PREFIX`，redis.py:670
+/// ——记录 `{esp}events:{id}` + 类型索引 `{esp}types:{type}`）。
+pub const DEFAULT_EVENT_STORAGE_PREFIX: &str = "plaita:event:";
+
+/// 影子部署的事件存储前缀（apply_shadow 改写默认值后的落点）。
+pub const SHADOW_EVENT_STORAGE_PREFIX: &str = "plaita-rs-shadow:event:";
+
+/// 事件回扫器默认周期/回填窗口（Python event_reconcile.py 同值：300s /
+/// 3600s）。
+pub const DEFAULT_RECONCILE_INTERVAL_SECS: f64 = 300.0;
+pub const DEFAULT_RECONCILE_BACKFILL_SECS: f64 = 3600.0;
+
+/// PLAITA_EVENT_RECONCILE_INTERVAL：非法/≤0 → 默认 + 具名 WARNING（0 是
+/// 紧环不是「关闭」——关闸是 PLAITA_DISABLE_EVENT_RECONCILE=1 的决策，
+/// env 永远关不掉；Python B2R31-03 同口径）。
+fn env_reconcile_interval(getenv: &impl Fn(&str) -> String) -> f64 {
+    let v = getenv("PLAITA_EVENT_RECONCILE_INTERVAL");
+    if v.is_empty() {
+        return DEFAULT_RECONCILE_INTERVAL_SECS;
+    }
+    match v.trim().parse::<f64>() {
+        Ok(n) if n.is_finite() && n > 0.0 => n,
+        other => {
+            eprintln!(
+                "[config] invalid PLAITA_EVENT_RECONCILE_INTERVAL={v:?} (parsed {other:?}); \
+                 falling back to the default {DEFAULT_RECONCILE_INTERVAL_SECS}s — set a \
+                 positive value to tune it, PLAITA_DISABLE_EVENT_RECONCILE=1 to disable"
+            );
+            DEFAULT_RECONCILE_INTERVAL_SECS
+        }
+    }
+}
+
+/// PLAITA_EVENT_RECONCILE_BACKFILL：非法 → 默认 + WARNING；负值按 0（只扫
+/// 当轮，不回填——回填窗口是补偿上界，不是扫面前置）。
+fn env_reconcile_backfill(getenv: &impl Fn(&str) -> String) -> f64 {
+    let v = getenv("PLAITA_EVENT_RECONCILE_BACKFILL");
+    if v.is_empty() {
+        return DEFAULT_RECONCILE_BACKFILL_SECS;
+    }
+    match v.trim().parse::<f64>() {
+        Ok(n) if n.is_finite() => n.max(0.0),
+        other => {
+            eprintln!(
+                "[config] invalid PLAITA_EVENT_RECONCILE_BACKFILL={v:?} (parsed {other:?}); \
+                 falling back to the default {DEFAULT_RECONCILE_BACKFILL_SECS}s"
+            );
+            DEFAULT_RECONCILE_BACKFILL_SECS
+        }
+    }
+}
 
 /// PLAITA_EXECUTION_DEADLINE_SECONDS (config.go:483-498 同口径): unset →
 /// default; non-numeric / non-finite / ≤0 → default + named WARNING (never a

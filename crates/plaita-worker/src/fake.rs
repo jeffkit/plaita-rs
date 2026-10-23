@@ -130,6 +130,9 @@ pub struct FakeRedis {
     /// Fault injection for tests: the next N rpush calls fail (pins the
     /// park-on-dispatch-failure semantics).
     rpush_failures: AtomicUsize,
+    /// Fault injection for tests: the next N XADD calls fail (pins the
+    /// enqueue-failure branches — the reconcile round-void semantics).
+    xadd_failures: AtomicUsize,
     /// Fault injection for tests: (key prefix, remaining failures) queue for
     /// GET — pins the probe-failure/fail-closed branches.
     get_failures: Mutex<Vec<(String, usize)>>,
@@ -155,6 +158,7 @@ impl FakeRedis {
             store: Mutex::new(Store::default()),
             subs: Mutex::new(Vec::new()),
             rpush_failures: AtomicUsize::new(0),
+            xadd_failures: AtomicUsize::new(0),
             get_failures: Mutex::new(Vec::new()),
         }
     }
@@ -173,6 +177,12 @@ impl FakeRedis {
     /// Test hook: the next `times` RPUSH calls fail (fault injection).
     pub fn fail_next_rpush(&self, times: usize) {
         self.rpush_failures
+            .store(times, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test hook: the next `times` XADD calls fail (fault injection).
+    pub fn fail_next_xadd(&self, times: usize) {
+        self.xadd_failures
             .store(times, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -712,6 +722,17 @@ impl RedisBackend for FakeRedis {
     }
 
     fn xadd(&self, key: &str, fields: &[(String, String)]) -> Result_<String> {
+        if self
+            .xadd_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| if n > 0 { Some(n - 1) } else { None },
+            )
+            .is_ok()
+        {
+            return io_err(format!("injected xadd failure ({key})"));
+        }
         let mut store = self.store.lock().unwrap();
         Self::gc_key(&mut store, key);
         let e = store

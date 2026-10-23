@@ -23,6 +23,20 @@ pub enum Event {
         flow_id: String,
         result: Option<Value>,
         error: Option<String>,
+        /// The ROOT execution's final context snapshot (the exact
+        /// [`crate::context::RuntimeCtx::snapshot_json`] nine-root shape),
+        /// attached ONLY by the root frame's emission (`rc.is_root_execution()`).
+        /// Sub-flow / loop / parallel-branch frames emit `None` — their
+        /// contexts are not the execution's final context.
+        ///
+        /// This is the worker's terminal-context capture face (rs#17 WK-M3;
+        /// rs-worker-design §7.4 host-hook increment): the go worker grabs
+        /// the root runtime in its OnFlowEnd hook via object identity
+        /// (`flow == run.rootFlow`, worker.go:229-247) and reads the final
+        /// roots at terminalization; the rs engine carries the equivalent
+        /// snapshot on the event payload so the worker never rebuilds the
+        /// terminal context from the seed + `$NODE` event stream.
+        context: Option<Value>,
     },
     NodeStart {
         flow_id: String,
@@ -263,10 +277,14 @@ impl Flow {
             Err(FlowError::Suspended(_)) => (None, None),
             Err(e) => (None, Some(e.to_string())),
         };
+        // execute 是根执行入口（rc 无父链）：FlowEnd 附根执行终态快照
+        // （rs#17 WK-M3 终态 context 采集面——worker 终态行直写该快照，
+        // 不再用种子+$NODE 事件流重建）。
         host.emit(Event::FlowEnd {
             flow_id: self.id.clone(),
             result: result_value,
             error: error_text,
+            context: rc.is_root_execution().then(|| rc.snapshot_json()),
         });
         // 流级预算到期 = 终态（#14）：timeoutHandler 不拦截。
         // Python 权威侧无流级 handler，预算到期恒 ExecutionDeadlineError；
@@ -347,10 +365,15 @@ impl Flow {
             Err(FlowError::Suspended(_)) => (None, None),
             Err(e) => (None, Some(e.to_string())),
         };
+        // 只有根执行帧（rc 无父链）附终态快照：恢复续跑循环里根帧的
+        // FlowEnd 是最后一次发射（内层帧先收尾），子流/分支/迭代帧一律
+        // context=None——与 go OnFlowEnd 的 `flow == run.rootFlow` 对象
+        // 同一性门同准（rs#17 WK-M3）。
         host.emit(Event::FlowEnd {
             flow_id: self.id.clone(),
             result: result_value,
             error: error_text,
+            context: rc.is_root_execution().then(|| rc.snapshot_json()),
         });
         match result {
             Ok(v) => Ok(v),

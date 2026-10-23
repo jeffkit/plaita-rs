@@ -57,6 +57,11 @@ struct HistoryInner {
     dropped: u64,
     enqueued_at: String,
     queue_wait_ms: Option<f64>,
+    /// The ROOT execution's final context snapshot (the engine's FlowEnd
+    /// `context` payload, rs#17 WK-M3): terminal rows write THIS instead of
+    /// the seed + $NODE reconstruction. `None` until the engine's root frame
+    /// emits (sub-flow frames never attach).
+    final_context: Option<Value>,
 }
 
 const TIMELINE_MAX_EVENTS: usize = 500;
@@ -74,6 +79,7 @@ impl RunHistory {
                 dropped: 0,
                 enqueued_at: enqueued_at.to_string(),
                 queue_wait_ms,
+                final_context: None,
             })),
         }
     }
@@ -146,6 +152,25 @@ impl RunHistory {
                 ctx.insert("last_node".into(), json!(last));
             }
         }
+    }
+
+    /// The terminal row's context: the ROOT execution's final snapshot (the
+    /// engine FlowEnd `context` payload, rs#17 WK-M3 — the exact nine-root
+    /// shape, same one the suspend path checkpoints) when the engine emitted
+    /// it; the seed + $NODE event-stream reconstruction remains only as the
+    /// fallback for hosts/sessions that never reached the engine's root
+    /// FlowEnd (e.g. the checkpoint-rebuild failure short circuit). go
+    /// counterpart: buildCheckpoint reading the root runtime captured in the
+    /// OnFlowEnd hook (worker.go:2446-2474).
+    fn apply_final_context(&self, context: &mut Value) {
+        {
+            let h = self.inner.lock().unwrap();
+            if let Some(snap) = &h.final_context {
+                *context = snap.clone();
+                return;
+            }
+        }
+        self.apply_to_context(context);
     }
 
     fn snapshot_timeline(&self) -> Value {
@@ -245,6 +270,20 @@ impl RunHistory {
                         "error": error.clone(),
                     }),
                 );
+            }
+            plaita_engine::exec::Event::FlowEnd {
+                context: Some(snap),
+                ..
+            } => {
+                // rs#17 WK-M3: the engine attaches the exact nine-root
+                // snapshot ONLY on the root execution's FlowEnd (sub-flow
+                // frames emit None — engine-side, matching go's
+                // `flow == run.rootFlow` identity gate). Last-wins is the
+                // engine's own FlowEnd session convention ("可重复、最后一
+                // 次为准"): in both the fresh-execute and the resume unwind
+                // the ROOT frame is the last emitter.
+                let mut h = self.inner.lock().unwrap();
+                h.final_context = Some(snap.clone());
             }
             _ => {}
         })
@@ -557,6 +596,20 @@ impl Worker {
             let stop = self.stop.clone();
             handles.push(std::thread::spawn(move || {
                 events::event_bridge_loop(backend, cfg, Arc::new(queue), subs, stop)
+            }));
+        }
+        // Event storage reconciler (§8.2 M3 — the bridge's subscription-
+        // window backstop; PLAITA_DISABLE_EVENT_RECONCILE=1 bypasses the
+        // whole face inside the loop).
+        {
+            let backend = self.backend.clone();
+            let cfg = self.cfg.clone();
+            let queue =
+                TaskQueue::new(self.backend.clone(), self.cfg.clone(), self.metrics.clone());
+            let subs = self.subs.clone();
+            let stop = self.stop.clone();
+            handles.push(std::thread::spawn(move || {
+                crate::reconcile::reconcile_loop(backend, cfg, Arc::new(queue), subs, stop)
             }));
         }
         // Registry heartbeat (§8.1 layer 1) — starts BEFORE the running
@@ -1737,7 +1790,7 @@ impl Worker {
             );
             emit_result("cancelled");
             history.record_timeline("run_end", json!({"final": true}));
-            history.apply_to_context(&mut state_row.context);
+            history.apply_final_context(&mut state_row.context);
             let now = now_iso();
             state_row.status = state::STATUS_CANCELLED.to_string();
             state_row.end_time = now.clone();
@@ -1801,7 +1854,7 @@ impl Worker {
             }
             Err(engine_err) => {
                 emit_result("failed");
-                history.apply_to_context(&mut state_row.context);
+                history.apply_final_context(&mut state_row.context);
                 // [M2] §11.3 deadline verdict: after the suspend/lease/drain/
                 // cancel determinations, BEFORE the engine error — a deadline
                 // cancellation must never be re-classified from the error
@@ -1962,7 +2015,7 @@ impl Worker {
                 );
                 emit_result("completed");
                 history.record_timeline("run_end", json!({"final": true, "result": value}));
-                history.apply_to_context(&mut state_row.context);
+                history.apply_final_context(&mut state_row.context);
                 let now = now_iso();
                 state_row.status = state::STATUS_COMPLETED.to_string();
                 state_row.end_time = now.clone();

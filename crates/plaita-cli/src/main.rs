@@ -180,6 +180,9 @@ fn println_event(flow_label: &str, event: &plaita_engine::Event) {
             flow_id,
             result,
             error,
+            // 根执行终态快照是 worker 层的持久化面，CLI 观测输出不展开
+            //（展开会污染对拍 JSON 的形状）。
+            context: _,
         } => serde_json::json!({
             "event": "flow_end", "flow": flow_id, "root": flow_label,
             "result": result, "error": error,
