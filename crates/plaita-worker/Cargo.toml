@@ -1,0 +1,30 @@
+[package]
+name = "plaita-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "plaita worker runtime: Redis Streams consumption, execution leases, checkpoints, suspend/resume dispatch (protocol-compatible with plaita-go pkg/worker)"
+
+[[bin]]
+name = "plaita-rs-worker"
+path = "src/bin/worker.rs"
+
+[dependencies]
+plaita-engine = { path = "../plaita-engine" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+sha2 = "0.10"
+# Sync (blocking) client only — the engine is a std::thread model; an async
+# runtime would be net debt for a single-process consume loop (rs-worker
+# design §2.2). `script` runs the lease/fence Lua texts verbatim.
+redis = { version = "0.27", default-features = false, features = [
+    "script",
+    "streams",
+] }
+# SIGTERM/SIGINT → drain (D3); sync-friendly signal delivery for the bin.
+signal-hook = "0.3"

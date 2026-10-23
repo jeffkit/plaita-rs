@@ -1,0 +1,324 @@
+//! Worker configuration (port of plaita-go config.go, M1 knob set): every
+//! field is overridable through environment variables so a shadow deployment
+//! can rewrite the full key space without touching production keys. Derived
+//! defaults are filled by [`Config::normalize`] — KeyPrefix first, then the
+//! queue/group/DLQ names derive from it.
+
+/// This build's envelope write version (§4.1 TASK_SCHEMA_VERSION=1).
+pub const TASK_SCHEMA_VERSION: i64 = 1;
+
+/// Default key namespace root (§3: `{prefix}` = plaita).
+pub const DEFAULT_KEY_PREFIX: &str = "plaita";
+
+/// Shadow namespace root (§3 ApplyShadow): a shadow run never touches
+/// production keys.
+pub const SHADOW_KEY_PREFIX: &str = "plaita-rs-shadow";
+
+/// Fenced fence-key TTL in seconds (§3 FENCE_KEY_TTL_SECONDS, 7d).
+pub const FENCE_KEY_TTL_SECONDS: i64 = 7 * 86400;
+
+/// Worker-judged node-abort code (plaita DEFAULT_NODE_ABORT_CODE).
+pub const DEFAULT_NODE_ABORT_CODE: i64 = -520;
+
+/// Reclaim scan window (#196 rotating window, task_queue.py:534).
+pub const RECLAIM_WINDOW: i64 = 8;
+
+/// Transient Redis failure backoff before the next consume round (§4.2).
+pub const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Engine marker written into the state row (`engine_version`).
+pub fn engine_version() -> String {
+    format!("plaita-rs {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Every M1 knob of the worker.
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// PLAITA_REDIS_URL / REDIS_URL (default redis://127.0.0.1:6379/0).
+    pub redis_url: String,
+    /// PLAITA_QUEUE_NAME (default `<KeyPrefix>:flow:queue`).
+    pub queue_name: String,
+    /// PLAITA_CONSUMER_GROUP (default `plaita-workers`, or
+    /// `<KeyPrefix>-workers` when KeyPrefix is overridden — shadow consumers
+    /// never join the production group).
+    pub consumer_group: String,
+    /// PLAITA_CONSUMER_NAME (default instance id).
+    pub consumer_name: String,
+    /// PLAITA_INSTANCE_ID (default `worker-<pid>`); embedded in lease holder
+    /// tokens.
+    pub instance_id: String,
+    /// PLAITA_CLAIM_MIN_IDLE_MS (default 60000) — pending-message XCLAIM
+    /// reclaim threshold.
+    pub claim_min_idle_ms: i64,
+    /// PLAITA_LEASE_TTL_SECONDS (default 120).
+    pub lease_ttl_seconds: i64,
+    /// PLAITA_MAX_DELIVERIES (default 5) — delivery ceiling on the reclaim
+    /// path before the (guarded) dead-letter.
+    pub max_deliveries: i64,
+    /// PLAITA_DLQ_KEY (default `<queue>:dlq`).
+    pub dlq_key: String,
+    /// PLAITA_DLQ_MAX_LEN (default 1000) — DLQ XTRIM retention (exact).
+    pub dlq_max_len: i64,
+    /// PLAITA_READ_BLOCK_MS — XREADGROUP BLOCK cap (default 1000, floor 100;
+    /// the ≤1s slice is the shutdown-latency bound, flow_worker.py:7126).
+    pub read_block_ms: i64,
+    /// PLAITA_KEY_PREFIX — namespace root for every derived key.
+    pub key_prefix: String,
+    /// PLAITA_DEFAULT_TENANT_ID (default "default"); the plain prefix is the
+    /// namespace of the default/empty tenant.
+    pub default_tenant_id: String,
+    /// PLAITA_EVENT_TTL_SECONDS (default 7d) — subscription record TTL.
+    pub event_ttl_seconds: i64,
+    /// PLAITA_EXECUTION_STATE_TTL_DAYS (default 30) — terminal state TTL.
+    pub state_ttl_days: i64,
+    /// PLAITA_SWEEP_INTERVAL_SECONDS (default 300) — acked-residue sweep.
+    pub sweep_interval_secs: i64,
+    /// PLAITA_WORKER_DRAIN_TIMEOUT (default 30s) — D1→D2 escalation timer.
+    pub drain_timeout_secs: f64,
+    /// PLAITA_FLOW_CACHE_SIZE (default 100) / PLAITA_FLOW_CACHE_TTL_SECONDS
+    /// (default 300) — flow definition TTL cache.
+    pub flow_cache_size: usize,
+    pub flow_cache_ttl_secs: i64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config::from_env()
+    }
+}
+
+impl Config {
+    /// Protocol-default configuration from the process environment.
+    pub fn from_env() -> Config {
+        Config::from_getenv(|k| std::env::var(k).unwrap_or_default())
+    }
+
+    /// Testable environment reader (empty string = unset).
+    pub fn from_getenv(getenv: impl Fn(&str) -> String) -> Config {
+        let mut cfg = Config {
+            redis_url: getenv2(&getenv, &["PLAITA_REDIS_URL", "REDIS_URL"]),
+            queue_name: getenv("PLAITA_QUEUE_NAME"),
+            consumer_group: getenv("PLAITA_CONSUMER_GROUP"),
+            consumer_name: getenv("PLAITA_CONSUMER_NAME"),
+            instance_id: getenv("PLAITA_INSTANCE_ID"),
+            claim_min_idle_ms: env_i64(&getenv, "PLAITA_CLAIM_MIN_IDLE_MS", 60_000),
+            lease_ttl_seconds: env_i64(&getenv, "PLAITA_LEASE_TTL_SECONDS", 120),
+            max_deliveries: env_i64(&getenv, "PLAITA_MAX_DELIVERIES", 5),
+            dlq_key: getenv("PLAITA_DLQ_KEY"),
+            dlq_max_len: env_i64(&getenv, "PLAITA_DLQ_MAX_LEN", 1000),
+            read_block_ms: env_i64(&getenv, "PLAITA_READ_BLOCK_MS", 1000),
+            key_prefix: getenv("PLAITA_KEY_PREFIX"),
+            default_tenant_id: getenv("PLAITA_DEFAULT_TENANT_ID"),
+            event_ttl_seconds: env_i64(&getenv, "PLAITA_EVENT_TTL_SECONDS", 7 * 86400),
+            state_ttl_days: env_i64(&getenv, "PLAITA_EXECUTION_STATE_TTL_DAYS", 30),
+            sweep_interval_secs: env_i64(&getenv, "PLAITA_SWEEP_INTERVAL_SECONDS", 300),
+            drain_timeout_secs: env_f64(&getenv, "PLAITA_WORKER_DRAIN_TIMEOUT", 30.0),
+            flow_cache_size: env_i64(&getenv, "PLAITA_FLOW_CACHE_SIZE", 100).max(0) as usize,
+            flow_cache_ttl_secs: env_i64(&getenv, "PLAITA_FLOW_CACHE_TTL_SECONDS", 300),
+        };
+        cfg.normalize();
+        cfg
+    }
+
+    /// Fills the derived defaults. Order matters: KeyPrefix first, then the
+    /// queue/group/DLQ names derive from it.
+    pub fn normalize(&mut self) {
+        if self.key_prefix.is_empty() {
+            self.key_prefix = DEFAULT_KEY_PREFIX.to_string();
+        }
+        if self.redis_url.is_empty() {
+            self.redis_url = "redis://127.0.0.1:6379/0".to_string();
+        }
+        if self.queue_name.is_empty() {
+            self.queue_name = format!("{}:flow:queue", self.key_prefix);
+        }
+        if self.consumer_group.is_empty() {
+            self.consumer_group = if self.key_prefix == DEFAULT_KEY_PREFIX {
+                "plaita-workers".to_string()
+            } else {
+                format!("{}-workers", self.key_prefix)
+            };
+        }
+        if self.instance_id.is_empty() {
+            self.instance_id = format!("worker-{}", std::process::id());
+        }
+        if self.consumer_name.is_empty() {
+            self.consumer_name = self.instance_id.clone();
+        }
+        if self.dlq_key.is_empty() {
+            self.dlq_key = format!("{}:dlq", self.queue_name);
+        }
+        if self.default_tenant_id.is_empty() {
+            self.default_tenant_id = "default".to_string();
+        }
+        if self.claim_min_idle_ms < 0 {
+            self.claim_min_idle_ms = 60_000;
+        }
+        if self.lease_ttl_seconds <= 0 {
+            self.lease_ttl_seconds = 120;
+        }
+        if self.max_deliveries <= 0 {
+            self.max_deliveries = 5;
+        }
+        if self.dlq_max_len <= 0 {
+            self.dlq_max_len = 1000;
+        }
+        if self.read_block_ms < 100 {
+            // §4.2 read-block floor: the BLOCK slice bounds shutdown latency.
+            self.read_block_ms = 100;
+        }
+        if self.event_ttl_seconds <= 0 {
+            self.event_ttl_seconds = 7 * 86400;
+        }
+        if self.state_ttl_days <= 0 {
+            self.state_ttl_days = 30;
+        }
+        if self.sweep_interval_secs <= 0 {
+            self.sweep_interval_secs = 300;
+        }
+        if self.drain_timeout_secs <= 0.0 {
+            self.drain_timeout_secs = 30.0;
+        }
+        if self.flow_cache_size == 0 {
+            self.flow_cache_size = 100;
+        }
+        if self.flow_cache_ttl_secs <= 0 {
+            self.flow_cache_ttl_secs = 300;
+        }
+    }
+
+    /// The tenant-routed key namespace (§3): the plain prefix for the
+    /// default/empty tenant, `prefix:{tenant}` otherwise.
+    pub fn namespace(&self, tenant_id: &str) -> String {
+        if tenant_id.is_empty() || tenant_id == self.default_tenant_id {
+            self.key_prefix.clone()
+        } else {
+            format!("{}:{}", self.key_prefix, tenant_id)
+        }
+    }
+
+    /// Rewrites the namespace root into the shadow prefix. Explicit per-key
+    /// overrides win; everything derived is recomputed so no key can fall
+    /// back to production naming.
+    pub fn apply_shadow(&mut self) {
+        self.key_prefix = SHADOW_KEY_PREFIX.to_string();
+        let default_queue = format!("{DEFAULT_KEY_PREFIX}:flow:queue");
+        let shadow_queue = format!("{SHADOW_KEY_PREFIX}:flow:queue");
+        if self.queue_name == default_queue || self.queue_name == shadow_queue {
+            self.queue_name = shadow_queue;
+        }
+        let default_group = "plaita-workers".to_string();
+        let shadow_group = format!("{SHADOW_KEY_PREFIX}-workers");
+        if self.consumer_group == default_group || self.consumer_group == shadow_group {
+            self.consumer_group = shadow_group;
+        }
+        let derived_dlq = format!("{}:dlq", self.queue_name);
+        let default_dlq = format!("{default_queue}:dlq");
+        if self.dlq_key == derived_dlq || self.dlq_key == default_dlq {
+            self.dlq_key = derived_dlq;
+        }
+    }
+}
+
+fn getenv2(getenv: &impl Fn(&str) -> String, keys: &[&str]) -> String {
+    for k in keys {
+        let v = getenv(k);
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    String::new()
+}
+
+fn env_i64(getenv: &impl Fn(&str) -> String, key: &str, default: i64) -> i64 {
+    let v = getenv(key);
+    if v.is_empty() {
+        return default;
+    }
+    v.trim().parse().unwrap_or(default)
+}
+
+fn env_f64(getenv: &impl Fn(&str) -> String, key: &str, default: f64) -> f64 {
+    let v = getenv(key);
+    if v.is_empty() {
+        return default;
+    }
+    v.trim().parse().unwrap_or(default)
+}
+
+/// Naive local ISO timestamp the Python side writes
+/// (`datetime.now().isoformat()` — no timezone suffix, §6.1).
+pub fn now_iso() -> String {
+    chrono::Local::now()
+        .format("%Y-%m-%dT%H:%M:%S%.6f")
+        .to_string()
+}
+
+/// Float epoch seconds (UnixNano/1e9口径, queue DLQ envelopes + timeout
+/// scores).
+pub fn float_epoch() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Mints a uuid4-hex execution id (§4.1: uuid4 hex form).
+pub fn new_execution_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_protocol_defaults() {
+        let cfg = Config::from_getenv(|_| String::new());
+        assert_eq!(cfg.key_prefix, "plaita");
+        assert_eq!(cfg.queue_name, "plaita:flow:queue");
+        assert_eq!(cfg.consumer_group, "plaita-workers");
+        assert_eq!(cfg.dlq_key, "plaita:flow:queue:dlq");
+        assert_eq!(cfg.default_tenant_id, "default");
+        assert_eq!(cfg.namespace(""), "plaita");
+        assert_eq!(cfg.namespace("default"), "plaita");
+        assert_eq!(cfg.namespace("acme"), "plaita:acme");
+        assert_eq!(cfg.read_block_ms, 1000);
+        assert!(cfg.instance_id.starts_with("worker-"));
+        assert_eq!(cfg.redis_url, "redis://127.0.0.1:6379/0");
+    }
+
+    #[test]
+    fn shadow_rewrite_moves_every_derived_key() {
+        let mut cfg = Config::from_getenv(|_| String::new());
+        cfg.apply_shadow();
+        assert_eq!(cfg.key_prefix, SHADOW_KEY_PREFIX);
+        assert_eq!(cfg.queue_name, "plaita-rs-shadow:flow:queue");
+        assert_eq!(cfg.consumer_group, "plaita-rs-shadow-workers");
+        assert_eq!(cfg.dlq_key, "plaita-rs-shadow:flow:queue:dlq");
+    }
+
+    #[test]
+    fn overridden_prefix_moves_default_group() {
+        let cfg = Config::from_getenv(|k| {
+            if k == "PLAITA_KEY_PREFIX" {
+                "tenant-a".to_string()
+            } else {
+                String::new()
+            }
+        });
+        assert_eq!(cfg.queue_name, "tenant-a:flow:queue");
+        assert_eq!(cfg.consumer_group, "tenant-a-workers");
+    }
+
+    #[test]
+    fn read_block_floor_and_invalid_fallbacks() {
+        let cfg = Config::from_getenv(|k| match k {
+            "PLAITA_READ_BLOCK_MS" => "10".to_string(),
+            "PLAITA_LEASE_TTL_SECONDS" => "not-a-number".to_string(),
+            _ => String::new(),
+        });
+        assert_eq!(cfg.read_block_ms, 100);
+        assert_eq!(cfg.lease_ttl_seconds, 120);
+    }
+}

@@ -4,6 +4,7 @@ members = [
     "crates/plaita-expression",
     "crates/plaita-engine",
     "crates/plaita-cli",
+    "crates/plaita-worker",
 ]
 
 [workspace.package]

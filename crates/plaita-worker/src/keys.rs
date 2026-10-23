@@ -1,0 +1,159 @@
+//! The Redis key space (rs-worker-design §3, byte-compatible with
+//! plaita-go): every key derivation lives here so the real backend, the
+//! in-memory fake and the tests agree by construction.
+//!
+//! `{ns}` = `cfg.namespace(tenant)` (default/empty tenant = `KeyPrefix`,
+//! otherwise `KeyPrefix:{tenant}`); `{prefix}` = `cfg.key_prefix` (the plain,
+//! un-tenant-routed root — the timeout index / dedup keys / service queues
+//! are namespace-wide, exactly as plaita-go derives them).
+
+use crate::config::Config;
+
+/// `{prefix}:flow:queue` — task main queue (stream).
+pub fn queue_key(cfg: &Config) -> String {
+    cfg.queue_name.clone()
+}
+
+/// `{prefix}:flow:queue:dlq` — dead-letter stream.
+pub fn dlq_key(cfg: &Config) -> String {
+    cfg.dlq_key.clone()
+}
+
+/// `{ns}:execution:{id}` — execution state row (string JSON).
+pub fn execution_state_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!("{}:execution:{}", cfg.namespace(tenant), execution_id)
+}
+
+/// `{ns}:execution:index` — execution list (ZSET, score = start epoch).
+pub fn execution_index_key(cfg: &Config, tenant: &str) -> String {
+    format!("{}:execution:index", cfg.namespace(tenant))
+}
+
+/// `{ns}:execution:lease:{id}` — lease (`{holder}:{gen}`, TTL = lease ttl).
+pub fn lease_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!("{}:execution:lease:{}", cfg.namespace(tenant), execution_id)
+}
+
+/// `{ns}:execution:fence:{id}` — current fence generation (TTL 7d).
+pub fn fence_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!("{}:execution:fence:{}", cfg.namespace(tenant), execution_id)
+}
+
+/// `{ns}:execution:fencegen:{id}` — generation counter (never deleted, no
+/// TTL — the ABA anchor).
+pub fn fencegen_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!(
+        "{}:execution:fencegen:{}",
+        cfg.namespace(tenant),
+        execution_id
+    )
+}
+
+/// `{ns}:execution:cancel:{id}` — cancel intent flag (value = ISO time,
+/// TTL 7d; worker reads, never deletes).
+pub fn cancel_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!(
+        "{}:execution:cancel:{}",
+        cfg.namespace(tenant),
+        execution_id
+    )
+}
+
+/// `{ns}:execution:checkpoint:{id}` — suspend checkpoint (no TTL while
+/// suspended; the terminal delete is the lifecycle bound).
+pub fn checkpoint_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!(
+        "{}:execution:checkpoint:{}",
+        cfg.namespace(tenant),
+        execution_id
+    )
+}
+
+/// `{ns}:event:subscriptions:{sub_id}` — subscription record (TTL = event
+/// TTL).
+pub fn subscription_key(cfg: &Config, tenant: &str, subscription_id: &str) -> String {
+    format!(
+        "{}:event:subscriptions:{}",
+        cfg.namespace(tenant),
+        subscription_id
+    )
+}
+
+/// `{ns}:event:subscriptions:type:{event_type}` — by-type index (SET).
+pub fn subscription_type_key(cfg: &Config, tenant: &str, event_type: &str) -> String {
+    format!(
+        "{}:event:subscriptions:type:{}",
+        cfg.namespace(tenant),
+        event_type
+    )
+}
+
+/// `{prefix}:event:subscriptions:timeouts` — due-time index (ZSET,
+/// member = subscription key, score = due epoch). Namespace-wide: the
+/// timeout checker scans one index for the whole deployment.
+pub fn subscription_timeouts_key(cfg: &Config) -> String {
+    format!("{}:event:subscriptions:timeouts", cfg.key_prefix)
+}
+
+/// `{prefix}:event:subscriptions:timeout_attempts` — per-member requeue
+/// attempt counters for the timeout sweep (#50 one-shot due queue).
+pub fn subscription_timeout_attempts_key(cfg: &Config) -> String {
+    format!("{}:event:subscriptions:timeout_attempts", cfg.key_prefix)
+}
+
+/// `{prefix}:event_filter:dedup:{event_id}:{sub_id}` — event dedup (NX, 1h).
+pub fn event_dedup_key(cfg: &Config, event_id: &str, subscription_id: &str) -> String {
+    format!(
+        "{}:event_filter:dedup:{}:{}",
+        cfg.key_prefix, event_id, subscription_id
+    )
+}
+
+/// `{prefix}:event_filter:timeout:{sub_id}` — timeout dedup (NX, 1h).
+pub fn timeout_dedup_key(cfg: &Config, subscription_id: &str) -> String {
+    format!(
+        "{}:event_filter:timeout:{}",
+        cfg.key_prefix, subscription_id
+    )
+}
+
+/// `{ns}:flow:{flow_id}:{version}` — flow IR storage (console engine_sync is
+/// the production writer).
+pub fn flow_key(cfg: &Config, tenant: &str, flow_id: &str, version: &str) -> String {
+    format!("{}:flow:{}:{}", cfg.namespace(tenant), flow_id, version)
+}
+
+/// `{ns}:flow_versions:{flow_id}` — SET of versions.
+pub fn flow_versions_key(cfg: &Config, tenant: &str, flow_id: &str) -> String {
+    format!("{}:flow_versions:{}", cfg.namespace(tenant), flow_id)
+}
+
+/// `{ns}:flow_list` — SET of flow ids.
+pub fn flow_list_key(cfg: &Config, tenant: &str) -> String {
+    format!("{}:flow_list", cfg.namespace(tenant))
+}
+
+/// `{prefix}:{subtype}:queue` — suspend service dispatch (RPUSH; delay/
+/// approval/…). KeyPrefix-derived (the rs/go convention; Python hardcodes
+/// `plaita:{subtype}:queue` — equal under the default prefix, documented
+/// divergence otherwise).
+pub fn service_queue_key(cfg: &Config, subtype: &str) -> String {
+    format!("{}:{}:queue", cfg.key_prefix, subtype)
+}
+
+/// Business event notification channel `{ns}:events:{event_type}` (Pub/Sub;
+/// the bridge subscribes to `{prefix}*:events:*`).
+pub fn business_event_channel(cfg: &Config, tenant: &str, event_type: &str) -> String {
+    format!("{}:events:{}", cfg.namespace(tenant), event_type)
+}
+
+/// Execution timeline live channel `{prefix}:execution:events:{id}` — the
+/// shape the event bridge must NOT consume (§8.2).
+pub fn execution_events_channel(cfg: &Config, execution_id: &str) -> String {
+    format!("{}:execution:events:{}", cfg.key_prefix, execution_id)
+}
+
+/// Pub/Sub pattern the event bridge subscribes to.
+pub fn event_bridge_pattern(cfg: &Config) -> String {
+    format!("{}*:events:*", cfg.key_prefix)
+}

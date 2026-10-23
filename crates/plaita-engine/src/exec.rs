@@ -835,6 +835,34 @@ impl SuspendedExecution {
 }
 
 impl SuspendedExecution {
+    /// Rebuild entry for the worker layer's checkpoint recovery (rs-worker
+    /// design §7.4 E2): reassembles a suspended execution from the persisted
+    /// parts — the flow (rebuilt via `ir::load`), the context (rebuilt via
+    /// [`RuntimeCtx::from_snapshot_json`] + `shared()`), a freshly wired host
+    /// and the suspended node id recorded in the checkpoint.
+    ///
+    /// Recovery itself is NOT re-implemented here: [`SuspendedExecution::resume`]
+    /// (admission gates, `RESUME_BINDING_KEY` stripping, fresh budget,
+    /// subscription unregister, NodeEnd, advance) is the single resume chain
+    /// and the worker must reuse it instead of forking recovery logic. The
+    /// flow budget stays unset — `resume` issues the fresh session budget.
+    pub fn from_parts(
+        flow: Flow,
+        rc: SharedCtx,
+        host: Host,
+        suspended_node: impl Into<String>,
+    ) -> SuspendedExecution {
+        SuspendedExecution {
+            suspended_node: suspended_node.into(),
+            flow,
+            rc,
+            host,
+            // worker 从 checkpoint 重建的现场没有调用栈——持久化层携带
+            // 嵌套路径后由 worker 侧回填（M2）；进程内语义 = 根流程挂起。
+            call_stack: Vec::new(),
+        }
+    }
+
     /// 挂起节点的存储状态（$NODE 表项：status pending + 唤醒契约 + 订阅绑定）。
     pub fn node_state(&self) -> Value {
         self.rc
