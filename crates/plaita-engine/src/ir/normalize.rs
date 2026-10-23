@@ -17,7 +17,7 @@
 //! - embedded flows (childFlow / branches[].flow) normalize + validate
 //!   recursively (mirrors plaita's check_childflow_reachable_end).
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use std::time::Instant;
 
@@ -50,14 +50,24 @@ pub const SUPPORTED_NODE_TYPES: &[&str] = &[
     "case",
     "mock",
     "reference",
+    // 挂起族七类（suspend/resume 架构，B4 r12）：等待/恢复契约的引擎侧
+    // （pending 载荷 + 决策载体 + 订阅注册表宿主面）已落地。
+    "event",
+    "hitl_await",
+    "delay",
+    "approval",
+    "redis_queue",
+    "kafka_queue",
+    "http_callback",
     // The remainder of plaita-go's accept list is NOT implemented by
     // plaita-rs yet; each gets a targeted hint in KNOWN_UNSUPPORTED.
 ];
 
 /// plaita-go's accept-list entries plaita-rs has not ported, with hints.
-/// 两大留白族：挂起型（event/hitl_await/server 五类——等待/恢复全在引擎外，
-/// 本引擎无 suspend/resume 架构，实装=先建执行架构）与外部宿主族
-/// （agentrun + plaita-nodes——需要 agentproc/凭据/服务商基础设施）。
+/// 留白族：外部宿主（agentrun + plaita-nodes——需要 agentproc/凭据/服务商
+/// 基础设施）。挂起族七类已随 suspend/resume 架构转正（B4 r12）；其部署侧
+/// 依赖（服务层/订阅存储）在 capability manifest 的 node_dependencies 键
+/// 逐节点标注。
 pub const KNOWN_UNSUPPORTED: &[(&str, &str)] = &[
     (
         "calculate",
@@ -137,48 +147,6 @@ pub const KNOWN_UNSUPPORTED: &[(&str, &str)] = &[
     ("llm", "llm node is not ported by plaita-rs yet"),
     ("decision", "decision node is not ported by plaita-rs yet"),
     ("hitl", "hitl node is not ported by plaita-rs yet"),
-    (
-        "event",
-        "event node (suspending) is not ported by plaita-rs yet: the wait/resume \
-         cycle lives outside the engine (subscription store + resume events); \
-         this engine has no suspend/resume architecture",
-    ),
-    (
-        "hitl_await",
-        "hitl_await node (suspending) is not ported by plaita-rs yet: the wait/resume \
-         cycle lives outside the engine (subscription store + resume events); \
-         this engine has no suspend/resume architecture",
-    ),
-    (
-        "delay",
-        "delay node (server extension, suspending) is not ported by plaita-rs yet: \
-         scheduling/consume services are deployment-side facilities and this engine \
-         has no suspend/resume architecture",
-    ),
-    (
-        "approval",
-        "approval node (server extension, suspending) is not ported by plaita-rs yet: \
-         the approval service is a deployment-side facility and this engine has no \
-         suspend/resume architecture",
-    ),
-    (
-        "redis_queue",
-        "redis_queue node (server extension, suspending) is not ported by plaita-rs yet: \
-         the queue consumer is a deployment-side facility and this engine has no \
-         suspend/resume architecture",
-    ),
-    (
-        "kafka_queue",
-        "kafka_queue node (server extension, suspending) is not ported by plaita-rs yet: \
-         the queue consumer is a deployment-side facility and this engine has no \
-         suspend/resume architecture",
-    ),
-    (
-        "http_callback",
-        "http_callback node (server extension, suspending) is not ported by plaita-rs yet: \
-         the callback ingress is a deployment-side facility and this engine has no \
-         suspend/resume architecture",
-    ),
     (
         "sql_query",
         "sql_query node is not ported by plaita-rs yet (driver selection + credential \
@@ -459,6 +427,13 @@ fn normalize_node(
         "case" => translate_case(n),
         "mock" => Ok(()),
         "reference" => translate_reference(n, resolver, depth),
+        "event" => translate_event(n),
+        "hitl_await" => translate_hitl_await(n),
+        "delay" => translate_delay(n),
+        "approval" => translate_approval(n),
+        "redis_queue" => translate_redis_queue(n),
+        "kafka_queue" => translate_kafka_queue(n),
+        "http_callback" => translate_http_callback(n),
         "http" => translate_http(n),
         "code" => translate_code(n),
         "end" => translate_end(n),
@@ -1014,6 +989,482 @@ fn translate_http(n: &mut Map<String, Value>) -> Result<(), String> {
     }
     fold_key(n, "max_redirects", "maxRedirects");
     n.insert("metadata".into(), Value::Object(meta));
+    Ok(())
+}
+
+// -- 挂起族七类的装载面（plaita-go translate_server.go/translateEvent/
+//    translateHitlAwait 移植）--------------------------------------------------
+//
+// 权威 = plaita/server/nodes/*_node.py 的 pydantic 模型层：必填字段、Literal
+// 枚举、大小写归一（mode="before" validator）与缺省值都在模型校验期生效——
+// 部署 flow 带非法枚举/缺必填时 plaita 的 Flow.model_validate 直接拒绝，
+// 本引擎同样在装载期拒绝（fail-closed 对齐，不给「这里能跑、plaita 拒载」
+// 的跨运行时假象）。固定事件订阅契约：approval/redis_queue/kafka_queue/
+// http_callback 的 event_type 由 validator 无条件覆盖（用户值不参与）；delay
+// 不覆盖（可配，默认 delay_trigger）；event 的 event_type 是作者必填字段。
+
+/// gt=0 约束共享（0 会让订阅一注册就超时）。数字或数字串可解析。
+fn normalize_seconds(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// Go %v 的 JSON 形态（枚举拒绝消息里的原值展示）。
+fn plaita_expression_or_display(v: &Value) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| format!("{v}"))
+}
+
+fn validate_subscription_timeout(v: &Value) -> Result<(), String> {
+    match normalize_seconds(v) {
+        Some(seconds) if seconds > 0.0 => Ok(()),
+        _ => Err(format!(
+            "subscription_timeout must be a positive number of seconds, got {v}"
+        )),
+    }
+}
+
+fn event_filter_shape(n: &Map<String, Value>) -> Result<(), String> {
+    if let Some(v) = n.get("event_filter") {
+        if !v.is_null() && !v.is_object() {
+            return Err("event_filter must be an object".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// event 节点（event_node.py）：event_type 必填非空（空类型在匹配器里是
+/// 通配）、event_filter 对象、subscription_timeout > 0。
+fn translate_event(n: &mut Map<String, Value>) -> Result<(), String> {
+    fold_key(n, "eventType", "event_type");
+    fold_key(n, "eventFilter", "event_filter");
+    fold_key(n, "subscriptionTimeout", "subscription_timeout");
+    let event_type = n.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+    if event_type.trim().is_empty() {
+        return Err(
+            "event node requires a non-empty event_type (an empty type is treated as a wildcard)"
+                .to_string(),
+        );
+    }
+    event_filter_shape(n)?;
+    if let Some(v) = n.get("subscription_timeout") {
+        if !v.is_null() {
+            validate_subscription_timeout(v)?;
+        }
+    }
+    Ok(())
+}
+
+/// hitl_await（plaita-nodes）：camel 别名折叠；timeout_secs/event_type 收
+/// 表达式，不在装载期收窄（节点侧与 plaita 的 resolve_* 回退语义一致）。
+fn translate_hitl_await(n: &mut Map<String, Value>) -> Result<(), String> {
+    fold_key(n, "baseUrl", "base_url");
+    fold_key(n, "timeoutSecs", "timeout_secs");
+    fold_key(n, "eventType", "event_type");
+    fold_key(n, "eventFilter", "event_filter");
+    fold_key(n, "dryRun", "dry_run");
+    event_filter_shape(n)
+}
+
+/// delay（delay_node.py）：delay_seconds 必填（int|float|str，`$` 表达式
+/// 合法），delay_unit 大小写归一后限枚举；event_type 可配（缺省
+/// delay_trigger）。
+fn translate_delay(n: &mut Map<String, Value>) -> Result<(), String> {
+    fold_key(n, "eventType", "event_type");
+    fold_key(n, "eventFilter", "event_filter");
+    fold_key(n, "subscriptionTimeout", "subscription_timeout");
+    fold_key(n, "delaySeconds", "delay_seconds");
+    fold_key(n, "delayUnit", "delay_unit");
+
+    let seconds_shape = match n.get("delay_seconds") {
+        None | Some(Value::Null) => None,
+        Some(v @ (Value::String(_) | Value::Number(_))) => Some(v.clone()),
+        Some(other) => {
+            return Err(format!(
+                "delay_seconds must be a number or expression string, got {}",
+                type_name(other)
+            ))
+        }
+    };
+    let Some(_) = seconds_shape else {
+        return Err("delay node requires delay_seconds (int/float/expression)".to_string());
+    };
+    match n.get("event_type") {
+        Some(v) if !v.is_null() => {
+            if v.as_str().is_none() || v.as_str().unwrap_or("").trim().is_empty() {
+                return Err("delay event_type must be a non-empty string".to_string());
+            }
+        }
+        _ => {
+            // pydantic default：delay 是五节点里唯一 event_type 可配的。
+            n.insert("event_type".into(), Value::String("delay_trigger".into()));
+        }
+    }
+    if let Some(unit) = n.get("delay_unit").filter(|v| !v.is_null()) {
+        let Some(s) = unit.as_str() else {
+            return Err(format!(
+                "delay_unit must be a string, got {}",
+                type_name(unit)
+            ));
+        };
+        let lowered = s.to_lowercase();
+        if !matches!(lowered.as_str(), "seconds" | "minutes" | "hours" | "days") {
+            return Err(format!(
+                "delay_unit must be one of seconds/minutes/hours/days, got {lowered:?}"
+            ));
+        }
+        n.insert("delay_unit".into(), Value::String(lowered));
+    } else {
+        n.insert("delay_unit".into(), Value::String("seconds".into()));
+    }
+    event_filter_shape(n)?;
+    if let Some(v) = n.get("subscription_timeout") {
+        if !v.is_null() {
+            validate_subscription_timeout(v)?;
+        }
+    }
+    Ok(())
+}
+
+/// approval（approval_node.py）：标题/内容/审批人必填，枚举大小写归一，
+/// 缺省值按模型填充；event_type 强制覆盖为契约值；显式 null 的
+/// subscription_timeout 折叠为 -1（无限等待哨兵）。
+fn translate_approval(n: &mut Map<String, Value>) -> Result<(), String> {
+    for (camel, snake) in [
+        ("eventType", "event_type"),
+        ("eventFilter", "event_filter"),
+        ("subscriptionTimeout", "subscription_timeout"),
+        ("approvalTitle", "approval_title"),
+        ("approvalContent", "approval_content"),
+        ("approvalType", "approval_type"),
+        ("approvalStrategy", "approval_strategy"),
+        ("autoEscalation", "auto_escalation"),
+        ("escalationTimeoutHours", "escalation_timeout_hours"),
+        ("escalationApprovers", "escalation_approvers"),
+        ("formFields", "form_fields"),
+        ("allowComments", "allow_comments"),
+        ("requireComments", "require_comments"),
+        ("notificationConfig", "notification_config"),
+    ] {
+        fold_key(n, camel, snake);
+    }
+    for field in ["approval_title", "approval_content", "approvers"] {
+        let missing = n.get(field).map(|v| v.is_null()).unwrap_or(true);
+        if missing {
+            return Err(format!("approval node requires {field}"));
+        }
+    }
+    if !n.get("approvers").map(|v| v.is_array()).unwrap_or(false) {
+        return Err(format!(
+            "approval approvers must be a list, got {}",
+            type_name(n.get("approvers").unwrap_or(&Value::Null))
+        ));
+    }
+    if let Some(v) = n.get("approval_type").filter(|v| !v.is_null()) {
+        let Some(s) = v.as_str() else {
+            return Err(format!(
+                "approval_type must be a string, got {}",
+                type_name(v)
+            ));
+        };
+        let lowered = s.to_lowercase();
+        if !matches!(lowered.as_str(), "manual" | "auto") {
+            return Err(format!(
+                "approval_type must be one of manual/auto, got {lowered:?}"
+            ));
+        }
+        n.insert("approval_type".into(), Value::String(lowered));
+    } else {
+        n.insert("approval_type".into(), Value::String("manual".into()));
+    }
+    if let Some(v) = n.get("approval_strategy").filter(|v| !v.is_null()) {
+        let Some(s) = v.as_str() else {
+            return Err(format!(
+                "approval_strategy must be a string, got {}",
+                type_name(v)
+            ));
+        };
+        let lowered = s.to_lowercase();
+        if !matches!(lowered.as_str(), "any" | "all" | "majority") {
+            return Err(format!(
+                "approval_strategy must be one of any/all/majority, got {lowered:?}"
+            ));
+        }
+        n.insert("approval_strategy".into(), Value::String(lowered));
+    } else {
+        n.insert("approval_strategy".into(), Value::String("any".into()));
+    }
+    if !n.contains_key("escalation_timeout_hours") {
+        n.insert("escalation_timeout_hours".into(), json!(24));
+    }
+    if n.get("allow_comments").map(|v| v.is_null()).unwrap_or(true) {
+        n.insert("allow_comments".into(), json!(true));
+    }
+    // 运行时契约：event_type 无条件覆盖（Python _normalize_enums）。
+    n.insert(
+        "event_type".into(),
+        Value::String("approval_decision".into()),
+    );
+    event_filter_shape(n)?;
+    if let Some(v) = n.get("subscription_timeout") {
+        if v.is_null() {
+            // gt=0 校验 + 显式 null → -1 哨兵（无限等待）。
+            n.insert("subscription_timeout".into(), json!(-1));
+        } else {
+            validate_subscription_timeout(v)?;
+        }
+    }
+    Ok(())
+}
+
+/// redis_queue（redis_queue_node.py）：queue_name 必填，
+/// queue_type/message_format 限枚举，event_type 强制契约值。
+fn translate_redis_queue(n: &mut Map<String, Value>) -> Result<(), String> {
+    for (camel, snake) in [
+        ("eventType", "event_type"),
+        ("eventFilter", "event_filter"),
+        ("subscriptionTimeout", "subscription_timeout"),
+        ("redisHost", "redis_host"),
+        ("redisPort", "redis_port"),
+        ("redisDb", "redis_db"),
+        ("redisPassword", "redis_password"),
+        ("queueName", "queue_name"),
+        ("queueType", "queue_type"),
+        ("timeoutSeconds", "timeout_seconds"),
+        ("batchSize", "batch_size"),
+        ("messageFormat", "message_format"),
+    ] {
+        fold_key(n, camel, snake);
+    }
+    let missing = n.get("queue_name").map(|v| v.is_null()).unwrap_or(true);
+    if missing {
+        return Err("redis_queue node requires queue_name".to_string());
+    }
+    if let Some(v) = n.get("queue_type").filter(|v| !v.is_null()) {
+        let ok = v
+            .as_str()
+            .is_some_and(|s| matches!(s, "list" | "stream" | "pubsub"));
+        if !ok {
+            return Err(format!(
+                "queue_type must be one of list/stream/pubsub, got {}",
+                plaita_expression_or_display(v)
+            ));
+        }
+    } else {
+        n.insert("queue_type".into(), Value::String("list".into()));
+    }
+    if let Some(v) = n.get("message_format").filter(|v| !v.is_null()) {
+        let ok = v
+            .as_str()
+            .is_some_and(|s| matches!(s, "json" | "text" | "raw"));
+        if !ok {
+            return Err(format!(
+                "message_format must be one of json/text/raw, got {}",
+                plaita_expression_or_display(v)
+            ));
+        }
+    } else {
+        n.insert("message_format".into(), Value::String("json".into()));
+    }
+    n.insert("event_type".into(), Value::String("redis_message".into()));
+    event_filter_shape(n)?;
+    if let Some(v) = n.get("subscription_timeout") {
+        if !v.is_null() {
+            validate_subscription_timeout(v)?;
+        }
+    }
+    Ok(())
+}
+
+/// kafka_queue（kafka_queue_node.py）：bootstrap_servers（str|list）/topic/
+/// group_id 必填，协议/SASL/偏移/格式限枚举，event_type 强制契约值。
+fn translate_kafka_queue(n: &mut Map<String, Value>) -> Result<(), String> {
+    for (camel, snake) in [
+        ("eventType", "event_type"),
+        ("eventFilter", "event_filter"),
+        ("subscriptionTimeout", "subscription_timeout"),
+        ("bootstrapServers", "bootstrap_servers"),
+        ("securityProtocol", "security_protocol"),
+        ("saslMechanism", "sasl_mechanism"),
+        ("saslUsername", "sasl_username"),
+        ("saslPassword", "sasl_password"),
+        ("autoOffsetReset", "auto_offset_reset"),
+        ("enableAutoCommit", "enable_auto_commit"),
+        ("maxPollRecords", "max_poll_records"),
+        ("messageFormat", "message_format"),
+        ("timeoutMs", "timeout_ms"),
+    ] {
+        fold_key(n, camel, snake);
+    }
+    let Some(bootstrap) = n.get("bootstrap_servers").filter(|v| !v.is_null()) else {
+        return Err("kafka_queue node requires bootstrap_servers (string or list)".to_string());
+    };
+    match bootstrap {
+        Value::String(_) => {}
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                if item.as_str().is_none() {
+                    return Err(format!(
+                        "bootstrap_servers[{i}] must be a string, got {}",
+                        type_name(item)
+                    ));
+                }
+            }
+        }
+        other => {
+            return Err(format!(
+                "bootstrap_servers must be a string or list of strings, got {}",
+                type_name(other)
+            ))
+        }
+    }
+    for field in ["topic", "group_id"] {
+        let missing = n.get(field).map(|v| v.is_null()).unwrap_or(true);
+        if missing {
+            return Err(format!("kafka_queue node requires {field}"));
+        }
+    }
+    if let Some(v) = n.get("security_protocol").filter(|v| !v.is_null()) {
+        let ok = v
+            .as_str()
+            .is_some_and(|s| matches!(s, "PLAINTEXT" | "SSL" | "SASL_PLAINTEXT" | "SASL_SSL"));
+        if !ok {
+            return Err(format!(
+                "security_protocol must be one of PLAINTEXT/SSL/SASL_PLAINTEXT/SASL_SSL, got {}",
+                plaita_expression_or_display(v)
+            ));
+        }
+    } else {
+        n.insert(
+            "security_protocol".into(),
+            Value::String("PLAINTEXT".into()),
+        );
+    }
+    if let Some(v) = n.get("sasl_mechanism").filter(|v| !v.is_null()) {
+        let ok = v
+            .as_str()
+            .is_some_and(|s| matches!(s, "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512"));
+        if !ok {
+            return Err(format!(
+                "sasl_mechanism must be one of PLAIN/SCRAM-SHA-256/SCRAM-SHA-512, got {}",
+                plaita_expression_or_display(v)
+            ));
+        }
+    }
+    if let Some(v) = n.get("auto_offset_reset").filter(|v| !v.is_null()) {
+        let ok = v
+            .as_str()
+            .is_some_and(|s| matches!(s, "earliest" | "latest"));
+        if !ok {
+            return Err(format!(
+                "auto_offset_reset must be one of earliest/latest, got {}",
+                plaita_expression_or_display(v)
+            ));
+        }
+    } else {
+        n.insert("auto_offset_reset".into(), Value::String("latest".into()));
+    }
+    if let Some(v) = n.get("message_format").filter(|v| !v.is_null()) {
+        let ok = v.as_str().is_some_and(|s| matches!(s, "json" | "text"));
+        if !ok {
+            return Err(format!(
+                "message_format must be one of json/text, got {}",
+                plaita_expression_or_display(v)
+            ));
+        }
+    } else {
+        n.insert("message_format".into(), Value::String("json".into()));
+    }
+    if !n.contains_key("timeout_ms") {
+        n.insert("timeout_ms".into(), json!(30000));
+    }
+    if n.get("enable_auto_commit")
+        .map(|v| v.is_null())
+        .unwrap_or(true)
+    {
+        n.insert("enable_auto_commit".into(), json!(true));
+    }
+    if n.get("max_poll_records")
+        .map(|v| v.is_null())
+        .unwrap_or(true)
+    {
+        n.insert("max_poll_records".into(), json!(1));
+    }
+    n.insert("event_type".into(), Value::String("kafka_message".into()));
+    event_filter_shape(n)?;
+    if let Some(v) = n.get("subscription_timeout") {
+        if !v.is_null() {
+            validate_subscription_timeout(v)?;
+        }
+    }
+    Ok(())
+}
+
+/// http_callback（http_callback_node.py）：callback_method 大小写归一限
+/// 枚举、auth_type 限枚举，其余全有缺省；event_type 强制契约值。
+fn translate_http_callback(n: &mut Map<String, Value>) -> Result<(), String> {
+    for (camel, snake) in [
+        ("eventType", "event_type"),
+        ("eventFilter", "event_filter"),
+        ("subscriptionTimeout", "subscription_timeout"),
+        ("callbackPath", "callback_path"),
+        ("callbackMethod", "callback_method"),
+        ("callbackTimeoutMinutes", "callback_timeout_minutes"),
+        ("requireAuth", "require_auth"),
+        ("authType", "auth_type"),
+        ("authToken", "auth_token"),
+        ("validateHeaders", "validate_headers"),
+        ("validateParams", "validate_params"),
+        ("successResponse", "success_response"),
+        ("errorResponse", "error_response"),
+    ] {
+        fold_key(n, camel, snake);
+    }
+    if let Some(v) = n.get("callback_method").filter(|v| !v.is_null()) {
+        let Some(s) = v.as_str() else {
+            return Err(format!(
+                "callback_method must be a string, got {}",
+                type_name(v)
+            ));
+        };
+        let upper = s.to_uppercase();
+        if !matches!(upper.as_str(), "GET" | "POST" | "PUT" | "DELETE") {
+            return Err(format!(
+                "callback_method must be one of GET/POST/PUT/DELETE, got {upper:?}"
+            ));
+        }
+        n.insert("callback_method".into(), Value::String(upper));
+    } else {
+        n.insert("callback_method".into(), Value::String("POST".into()));
+    }
+    if let Some(v) = n.get("auth_type").filter(|v| !v.is_null()) {
+        let ok = v
+            .as_str()
+            .is_some_and(|s| matches!(s, "token" | "basic" | "signature"));
+        if !ok {
+            return Err(format!(
+                "auth_type must be one of token/basic/signature, got {}",
+                plaita_expression_or_display(v)
+            ));
+        }
+    } else {
+        n.insert("auth_type".into(), Value::String("token".into()));
+    }
+    if n.get("require_auth").map(|v| v.is_null()).unwrap_or(true) {
+        n.insert("require_auth".into(), json!(true));
+    }
+    if !n.contains_key("callback_timeout_minutes") {
+        n.insert("callback_timeout_minutes".into(), json!(60));
+    }
+    n.insert("event_type".into(), Value::String("http_callback".into()));
+    event_filter_shape(n)?;
+    if let Some(v) = n.get("subscription_timeout") {
+        if !v.is_null() {
+            validate_subscription_timeout(v)?;
+        }
+    }
     Ok(())
 }
 

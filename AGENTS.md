@@ -10,7 +10,9 @@
   执行引擎（变量根 / 条件 / 循环 / 并行 / 子流程 / 错误·超时·重试策略 / 事件回调）、
   内置节点（start / end / assignment / switch / if / loop / parallel / child /
   code〔python sidecar〕/ http；**#80 对齐转正**：map / filter / find / reduce /
-  while / case〔脱糖 switch〕/ mock / reference〔provider 注入〕）。
+  while / case〔脱糖 switch〕/ mock / reference〔provider 注入〕；
+  **挂起族七类**〔suspend/resume 架构，B4 r12〕：event / hitl_await / delay /
+  approval / redis_queue / kafka_queue / http_callback）。
 - **不在范围内（刻意不做）**：`pkg/worker`（Redis Streams 消费、租约 Lua、fence、DLQ、
   checkpoint 恢复、drain）、console BFF、沙箱 driver、影子对账 harness、agentproc。
   plaita-go 的这些层按 queue/lease 协议接 worker，本仓接不进来也不需要。
@@ -33,7 +35,11 @@ crates/
     src/exec.rs        执行循环：flow/node 两级 retry（flow 固定 10ms / node 指数 1s·2^n cap 30s）、
                        确定性错误不重试、超时归属（FLOW_ERROR vs NODE_ERROR）、错误/超时策略
                        （abort/continue/continue-with + code/message + $ERROR 记账）、事件回调
+    src/exec.rs 末尾   suspend/resume：挂起边界（pending 校验/订阅注册/$NODE 落账/
+                       FlowError::Suspended 载现场）+ SuspendedExecution::resume
+                       （绑定准入/pending 校验/状态翻转/订阅注销/恢复+续跑一步到位）
     src/nodes/         节点体：condition（15 算子 + None 短路）、loop（末次子结果语义）、
+                       suspend（挂起族七类执行体/恢复体 + hitl 客户端，http feature 门），
                        map/filter/find/reduce/while（集合并五类，loop.py 逐语义）、
                        mock（value 原样透传不求值）、reference（child_isolated 隔离上下文）、
                        parallel（joinBranches 空=全后台；分支失败=错误哨兵）、
@@ -117,6 +123,38 @@ http_callback——等待/恢复全在引擎外，实装前置=先建 suspend/re
 外部宿主族 21（agentrun + plaita-nodes，含 sql_query=plaita-go#84 同源评估）+
 Rust-only `code`（Python 刻意 opt-in 注册）。负控双实证：权威清单缩水→红、
 未设 env→skip（普通 cargo test 不受影响）。
+
+## 挂起/恢复架构（B4 r12，2026-10-23）
+
+**范围（Go checkpoint v1.5 同款，fail-closed）**：只有**根流程**可以挂起——嵌套
+child/loop/parallel 里的挂起点具名拒绝（其恢复位置无法用执行状态表达）。
+
+**引擎面**：挂起节点 execute 产出 `status:"pending"` 契约（extended 家族 =
+{event_type, event_filter, is_async, event_id, service_config, node_subtype}；
+hitl_await = {status, session_id, replies, timeout_secs}），挂起边界校验 pending、
+经宿主订阅注册表登记唤醒订阅（`Host::with_subscriptions`——**无注册表 = 无唤醒
+源，具名拒绝**；Python 订阅失败禁止挂起同款）、把 subscription_id/
+subscription_tenant 写进挂起态并落 `$NODE`，返回 `FlowError::Suspended(
+SuspendedExecution)`（载 flow+上下文现场）。`SuspendedExecution::resume(kind,
+payload)` 恢复+续跑一步到位（Go `Workflow.Resume` 语义）：准入（节点挂起型/
+status==pending/**订阅绑定**〔plaita#221：event/timeout 载体必须绑定挂起期登记
+的订阅，`__plaita_subscription_id` 准入后剥离，event_type 还须一致〕）→ 节点
+多态恢复（挂起态全量保留仅翻 status+event_data；event 节点恢复后保持 execute
+解析的 event_type〔Python dict.update 覆盖序〕）→ 报 NodeEnd、注销订阅 → 从
+后继继续。**恢复会话的执行预算新鲜发放**（flow 自有 timeout 或缺省 1800s）——
+否则 24h 审批的恢复会落在早已过期的原 deadline 上。
+
+**宿主面（刻意不在引擎内）**：订阅注册表实现、订阅超时的到期投递
+（resume_type=timeout；Python SubscriptionTimeoutChecker 同位）、五节点的
+service 层（delay 排程/approval 记录/队列消费/回调 ingress——deployment 设施，
+manifest 的 `node_dependencies` 键逐节点标注）。capability `CONTRACT_VERSION`
+bump **2026-10-23.2**。
+
+**验收**：server_nodes golden **30 例逐例对拍 Python 真跑 oracle**（挂起态对
+`$NODE` 对拍、恢复走 golden 预置载荷+订阅绑定注入、剔键+hex32/ms13 打码两侧
+同款；拒绝用例钉字段名）先红后绿 + 引擎面单测 12 例（作用域闸/无注册表拒/
+绑定准入/状态机/订阅注销/恢复记账/hitl dry_run+真实发送〔本地 HTTP stub〕/
+approval 缺省 24h 订阅超时·显式 null=无限等待）。
 
 ## 审计记录（2026-10-21，四路子智能体对抗审计）
 

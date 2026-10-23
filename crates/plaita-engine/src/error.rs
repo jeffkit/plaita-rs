@@ -119,6 +119,20 @@ pub enum FlowError {
     /// flows through handler chains: cancellation is an execution-level
     /// intent, not a node error. Terminal, like FlowTimeout.
     Cancelled { message: String },
+    /// The flow parked at a suspending node (plaita-go `SuspendError`). This
+    /// is deliberately an error variant: nested flow nodes wrap and propagate
+    /// errors, so a suspension physically cannot be mistaken for flow output
+    /// on the way up. The execution state travels inside; apply a decision
+    /// carrier with `SuspendedExecution::resume`.
+    Suspended(Box<crate::exec::SuspendedExecution>),
+    /// plaita `ResumeGuardError`: the resume carrier cannot be applied to the
+    /// current execution state (no suspended node, non-pending status,
+    /// unsupported resume type, stale subscription binding). The execution
+    /// stays suspended; the carrier is not a valid decision.
+    ResumeGuard { message: String },
+    /// plaita `ResumeError`: the carrier was admissible but the node's resume
+    /// handler failed.
+    ResumeError { message: String },
     /// Engine-level failures (reentry, missing node, ...).
     Other(String),
 }
@@ -196,6 +210,11 @@ impl fmt::Display for FlowError {
             FlowError::Cancelled { message } => {
                 write!(f, "code: {CANCELLED_ERROR_CODE}, message: {message}")
             }
+            FlowError::Suspended(suspended) => {
+                write!(f, "flow suspended at node {:?}", suspended.suspended_node)
+            }
+            FlowError::ResumeGuard { message } => write!(f, "{message}"),
+            FlowError::ResumeError { message } => write!(f, "{message}"),
             FlowError::Other(m) => write!(f, "{m}"),
         }
     }
