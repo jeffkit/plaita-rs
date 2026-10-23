@@ -851,6 +851,8 @@ fn translate_reference(
     depth: u32,
 ) -> Result<(), String> {
     fold_key(n, "flow_id", "flowId");
+    // plaita 生产者方言（ReferenceFlow.LEGACY_KEYS）：flowID/flowVersion。
+    fold_key(n, "flowID", "flowId");
     fold_key(n, "flow_version", "flowVersion");
     if let Some(cf) = n.get("childFlow") {
         if !cf.is_null() {

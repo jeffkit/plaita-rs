@@ -366,3 +366,37 @@ fn resume_during_cancel_is_refused() {
         "cancel gate expected, got: {err}"
     );
 }
+
+#[test]
+fn reference_flowid_producer_dialect_key_is_accepted() {
+    // NS-M4 对拍集顺带发现：plaita 生产者方言写 `flowID`（ReferenceFlow
+    // .LEGACY_KEYS），装载层原生折叠（不再需要 runner 侧归一）。
+    struct P;
+    impl plaita_engine::ir::FlowProvider for P {
+        fn load_flow_json(&self, id: &str, _v: Option<&str>) -> Result<Value, String> {
+            if id == "sub" {
+                Ok(json!({
+                    "flow_id": "sub",
+                    "nodes": [
+                        {"type": "start", "id": "a", "next": "b"},
+                        {"type": "end", "id": "b", "output": "ok", "resultType": "success"},
+                    ],
+                }))
+            } else {
+                Err(format!("no flow {id}"))
+            }
+        }
+    }
+    // flowID（生产者方言）/ flow_version（camel）都走原生折叠。
+    let doc = json!({
+        "flow_id": "root",
+        "nodes": [
+            {"type": "start", "id": "s", "next": "r"},
+            {"flowID": "sub", "flowVersion": "3", "id": "r", "input": {"n": 1}, "next": "o", "type": "reference"},
+            {"type": "end", "id": "o", "output": "$NODE.r", "resultType": "success"},
+        ],
+    });
+    let flow = ir::load_with_flow_provider(&serde_json::to_vec(&doc).unwrap(), &P)
+        .expect("flowID producer dialect must load");
+    assert_eq!(flow.find_node("r").unwrap().node_type, "reference");
+}

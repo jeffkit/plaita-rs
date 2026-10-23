@@ -854,6 +854,7 @@ fn node_known_keys(node_type: &str) -> Vec<&'static str> {
             "input",
             "flowId",
             "flow_id",
+            "flowID",
             "flowVersion",
             "flow_version",
         ],

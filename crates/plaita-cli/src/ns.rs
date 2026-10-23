@@ -74,25 +74,6 @@ fn reject_category(message: &str) -> &'static str {
 /// `flowID`（plaita `ReferenceFlow.LEGACY_KEYS` 同款），而 rs/go 装载层只认
 /// `flowId`/`flow_id`（差异已记 README「分歧清单」）。runner 侧改名，引擎
 /// 装载路径保持原样。
-fn adapt_reference_keys(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            if let Some(fid) = map.remove("flowID") {
-                map.entry("flowId".to_string()).or_insert(fid);
-            }
-            for (_, v) in map.iter_mut() {
-                adapt_reference_keys(v);
-            }
-        }
-        Value::Array(items) => {
-            for v in items.iter_mut() {
-                adapt_reference_keys(v);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// 执行一份用例并把统一结果 JSON 打到 stdout。
 pub fn run(case_path: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(case_path).map_err(|e| format!("read {case_path}: {e}"))?;
@@ -106,14 +87,12 @@ pub fn run(case_path: &str) -> Result<(), String> {
     let mut flows = HashMap::new();
     if let Some(map) = case.get("flows").and_then(|v| v.as_object()) {
         for (k, v) in map {
-            let mut doc = v.clone();
-            adapt_reference_keys(&mut doc);
+            let doc = v.clone();
             flows.insert(k.clone(), doc);
         }
     }
 
-    let mut flow_doc = case.get("flow").cloned().unwrap_or(Value::Null);
-    adapt_reference_keys(&mut flow_doc);
+    let flow_doc = case.get("flow").cloned().unwrap_or(Value::Null);
     let flow = ir::load_with_flow_provider(
         &serde_json::to_vec(&flow_doc).map_err(|e| format!("render flow: {e}"))?,
         &MapProvider { flows },
