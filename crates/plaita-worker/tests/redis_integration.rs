@@ -177,6 +177,24 @@ fn real_redis_suspend_wake_resume_full_chain() {
         .unwrap();
     assert_eq!(row.status, state::STATUS_COMPLETED);
     assert_eq!(row.context["nodes"]["mid"]["seen"], "completed");
+    // rs#17 WK-M3：终态行 context = 根执行 FlowEnd 的九根精确快照（真
+    // Redis 腿同形状核对；行为面详见 tests/terminal_context_e2e.rs）。
+    for root in [
+        "input",
+        "nodes",
+        "errors",
+        "env",
+        "global",
+        "last_node",
+        "last_branch",
+        "flow_id",
+        "execution_id",
+    ] {
+        assert!(
+            row.context.get(root).is_some(),
+            "terminal context root {root:?} present on real Redis"
+        );
+    }
     assert!(
         checkpoint::load(backend.as_ref(), &env.cfg, "", "it-exec-1")
             .unwrap()
