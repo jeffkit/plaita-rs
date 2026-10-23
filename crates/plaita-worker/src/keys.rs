@@ -252,3 +252,31 @@ pub fn event_storage_type_index_key(cfg: &Config, event_type: &str) -> String {
 pub fn event_reconcile_cursor_key(cfg: &Config) -> String {
     format!("{}:event_reconcile:cursor", cfg.key_prefix)
 }
+
+// -- 亲和让渡（§9.2 TaskNotForThisWorker；go worker.go:2300-2317 同键）----
+
+/// `{ns}:execution:affinityhandover:{id}` — 有界让渡计数（INCR + 滑 TTL
+/// 7d）。execution_id 维度（全局稳定：新副本原样重投同 body，跨「新
+/// msg id」连续累计——正是旧布尔标记缺的维度；Python
+/// _affinity_handover_key 同理）。
+pub fn affinity_handover_execution_key(cfg: &Config, tenant: &str, execution_id: &str) -> String {
+    format!(
+        "{}:execution:affinityhandover:{}",
+        cfg.namespace(tenant),
+        execution_id
+    )
+}
+
+/// `{prefix}:affinity:handover:{sha1}` — 无 execution_id 退化键（body 规范
+/// 化指纹；老消息/畸形消息仍足以抑制同副本立刻回弹，Python 退化契约
+/// 同款）。digest 由调用方（affinity.rs）按 go handoverKey 的 sha1 hex
+/// 铸出。
+pub fn affinity_handover_hash_key(cfg: &Config, digest: &str) -> String {
+    format!("{}:affinity:handover:{}", cfg.key_prefix, digest)
+}
+
+/// `{prefix}:dispatch:ledger` — 派发台账流（§6.3；键名经
+/// `cfg.dispatch_ledger_key`，此处为派生默认的单一事实源）。
+pub fn dispatch_ledger_key(cfg: &Config) -> String {
+    cfg.dispatch_ledger_key.clone()
+}

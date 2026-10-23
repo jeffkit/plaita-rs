@@ -133,6 +133,11 @@ pub struct FakeRedis {
     /// Fault injection for tests: the next N XADD calls fail (pins the
     /// enqueue-failure branches — the reconcile round-void semantics).
     xadd_failures: AtomicUsize,
+    /// Fault injection for tests: the next N INCR calls fail (pins the
+    /// handover-counter-unavailable fail-closed branch — the production
+    /// analogue is WRONGTYPE key pollution, flow_worker.py._record_affinity_
+    /// handover 的部署阻断级洞).
+    incr_failures: AtomicUsize,
     /// Fault injection for tests: (key prefix, remaining failures) queue for
     /// GET — pins the probe-failure/fail-closed branches.
     get_failures: Mutex<Vec<(String, usize)>>,
@@ -159,6 +164,7 @@ impl FakeRedis {
             subs: Mutex::new(Vec::new()),
             rpush_failures: AtomicUsize::new(0),
             xadd_failures: AtomicUsize::new(0),
+            incr_failures: AtomicUsize::new(0),
             get_failures: Mutex::new(Vec::new()),
         }
     }
@@ -183,6 +189,13 @@ impl FakeRedis {
     /// Test hook: the next `times` XADD calls fail (fault injection).
     pub fn fail_next_xadd(&self, times: usize) {
         self.xadd_failures
+            .store(times, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test hook: the next `times` INCR calls fail (fault injection — the
+    /// production analogue is a WRONGTYPE-polluted counter key).
+    pub fn fail_next_incr(&self, times: usize) {
+        self.incr_failures
             .store(times, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -500,6 +513,17 @@ impl RedisBackend for FakeRedis {
     }
 
     fn incr_by(&self, key: &str, delta: i64) -> Result_<i64> {
+        if self
+            .incr_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| if n > 0 { Some(n - 1) } else { None },
+            )
+            .is_ok()
+        {
+            return io_err(format!("injected incr failure ({key})"));
+        }
         let mut store = self.store.lock().unwrap();
         Self::gc_key(&mut store, key);
         let current: i64 = store
