@@ -7,6 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 description = "plaita worker runtime: Redis Streams consumption, execution leases, checkpoints, suspend/resume dispatch (protocol-compatible with plaita-go pkg/worker)"
 
+[[bin]]
+name = "plaita-rs-worker"
+path = "src/bin/worker.rs"
+
 [dependencies]
 plaita-engine = { path = "../plaita-engine" }
 serde = { workspace = true }

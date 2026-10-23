@@ -31,13 +31,17 @@ pub mod backend;
 pub mod checkpoint;
 pub mod config;
 pub mod error;
+pub mod events;
 pub mod fake;
 pub mod flowsource;
 pub mod keys;
 pub mod lease;
 pub mod metrics;
 pub mod queue;
+pub mod redis_impl;
 pub mod state;
+pub mod subscriptions;
+pub mod worker;
 
 pub use backend::{BackendError, PendingEntry, PsubStream, RedisBackend, StreamEntry, TxOp};
 pub use checkpoint::{
@@ -46,11 +50,15 @@ pub use checkpoint::{
 };
 pub use config::{now_iso, Config, DEFAULT_KEY_PREFIX, SHADOW_KEY_PREFIX, TASK_SCHEMA_VERSION};
 pub use error::{ErrorKind, WorkerError, FLOW_ERROR_CODE};
+pub use events::{handle_event, sweep_event_timeouts, Event};
 pub use flowsource::{
     canonical_flow_definition_json, flow_definition_hash, get_flow_definition,
     preset_flow_definition, FlowDefinition, FLOW_HASH_ALGO, LATEST_VERSION,
 };
-pub use lease::{new_holder_token, holder_instance_id, LeaseHandle};
+pub use lease::{holder_instance_id, new_holder_token, LeaseHandle};
 pub use metrics::{Metrics, NoopMetrics, METRIC_DLQ_TOTAL, METRIC_EXEC_RESULT, METRIC_QUEUE_DEPTH};
 pub use queue::{Delivery, Task, TaskQueue};
+pub use redis_impl::RedisConnection;
 pub use state::{ExecutionState, STATUS_SUSPENDED};
+pub use subscriptions::{EventSubscription, RedisSubscriptions};
+pub use worker::Worker;
