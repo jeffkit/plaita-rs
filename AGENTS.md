@@ -163,6 +163,34 @@ bump **2026-10-23.2**。
 绑定准入/状态机/订阅注销/恢复记账/hitl dry_run+真实发送〔本地 HTTP stub〕/
 approval 缺省 24h 订阅超时·显式 null=无限等待）。
 
+## 嵌套挂起 v1（B4 第十三轮，2026-10-23，rs#16）
+
+**语义（三平台同一契约，rs=NS-M1 参考实现；章程 docs/PROGRAM.md 程式一）**：
+挂起节点位于 child/reference 调用链（任意深度）内部时，挂起穿透到根流程、恢复
+沿调用栈精确续跑。
+
+- **作用域闸**：`RuntimeCtx.FrameKind`（Root/ChildCall/ReferenceCall/
+  LoopIteration/ParallelBranch，构造期标注）+ `frame_chain_blocker()`——调用链
+  帧允许；任何迭代帧/分支帧上的挂起具名拒绝（`FlowError::SuspendRejected`
+  专属类型：parallel join 哨兵语义必须让它节点失败而不是吞成数据——哨兵会让
+  流程带着未消费的挂起继续走=fail-open）。迭代状态快照（剩余集合/累积结果）
+  是 v2 候选，独立评审。
+- **传播**：内层 `execute_on` 的 `Err(Suspended)` 经 child/reference 节点体转
+  `NodeError::suspension` 载体上抛；`execute_node` 策略链先于预算归属/超时/
+  重试/errorHandler 原样转发（与取消门同待遇）；每层 `advance_from` 把本帧
+  （flow+rc+子节点 id）压入 `inner.call_stack`（压入序=传播序，最深父帧在前）。
+- **恢复**（`SuspendedExecution::resume` 续跑循环）：决策步（最内层 pending
+  节点，准入/状态翻转/订阅注销不变）→ 内层 flow 完成即「调用返回步」（父帧
+  `$NODE[child]`=返回值 + outputType 校验 + NodeEnd/FlowEnd + 每帧预算新鲜
+  发放 + 续跑 child.next）→ 直到根完成；续跑中再次挂起 = 新现场调用栈（更深，
+  在前）+ 剩余栈拼接，重入挂起态。
+- **观测**：`checkpoint_json()` 附 `call_stack` 路径（flow_id/node_id 链）。
+- **测试**：suspend.rs 3 例改造（child 链真挂起+栈路径/loop 帧拒/parallel 帧
+  拒）+ nested_suspend.rs 4 例（孙代双帧栈/reference 隔离保持/恢复中再挂起栈
+  合并/深位绑定准入与 timeout 载体）。
+- **go/plaita 跟进**：plaita-go#88（NS-M2）、plaita#311（NS-M3，顺带修
+  fail-open）；规格即本文档+docs/PROGRAM.md。
+
 ## 审计记录（2026-10-21，四路子智能体对抗审计）
 
 表达式对齐 / ir 契约 / 执行语义与并发 / 红队四路审计，全部 findings 双侧实测。已修复：
