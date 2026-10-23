@@ -41,19 +41,12 @@ UNAVAILABLE_EXIT = 3  # runner 约定：腿不可用（缺工具链/仓/二进�
 # 分歧，每条钉死「期望分歧形状」（engine → outcome，缺引擎 = 不参与形状判定）。
 # 形状保持期间门绿（注 known-red holds）；漂移即红并给归因/翻绿指引：
 # 引擎修复后（三引擎同绿）→ 从本表删除该条（翻绿进门）；反向漂移 → 先归因再动本表。
-KNOWN_RED: dict[str, dict[str, str]] = {
-    # plaita 恢复会话内层续跑进入 child/reference 节点即崩：_advance_frame_to_end
-    # （plaita/core/strategies.py:992）构造帧推进 runner 时 NodeRunner(context)
-    # 未带 node_execution=<FlowExecution facade>，子节点 arun 需要的
-    # get_child_execution 只在 facade 上（见 plaita test_nested_suspend.py
-    # test_carrier_escapes_normal_drive 注释）→ AttributeError。rs/go 无此缺口
-    # （恢复续跑与首跑同一推进通道）。plaita 的 NS-M3 测试集未覆盖「恢复续跑
-    # 途中进 child 节点」（其再挂起用例都在同帧 event 上再挂），故 NS-M3 绿而
-    # 此路断。引擎修复属后续轮——修后三引擎同绿，删本条升入正常对拍门。
-    "resuspension_merges_call_stacks": {
-        "rs": "completed", "go": "completed", "plaita": "engine_error",
-    },
-}
+# KNOWN_RED 当前为空。历史上钉过 case 09（resuspension_merges_call_stacks：
+# plaita 恢复续跑进入 child 即 AttributeError——_advance_frame_to_end 未接
+# node_execution facade），plaita 侧 62f8714 修复（_FrameExecutionView 双身份
+# 分派）后三引擎同绿升入正常对拍门，表项已删。机制保留：再发现分歧时按
+# check_known_red 的形状钉法登记（漂移即红给翻绿指引）。
+KNOWN_RED: dict[str, dict[str, str]] = {}
 
 
 def numbers_equal(a, b) -> bool:

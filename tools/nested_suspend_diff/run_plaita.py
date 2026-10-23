@@ -29,20 +29,23 @@ MAX_STEPS = 32  # continue 推进护栏（正常几步内到 end）
 
 
 def load_plaita():
-    """venv 优先；system python 兜底把兄弟仓挂上 sys.path。不可导入 = 腿缺席。"""
-    try:
-        import plaita  # noqa: F401
-        return
-    except ImportError:
-        pass
-    if PLAITA.is_dir():
-        sys.path.insert(0, str(PLAITA))
+    """plaita 源路径**显式钉定**（PLAITA_CHECKOUT env > 兄弟仓 ../plaita），
+    sys.path 置顶——venv 的 editable 安装指向共享主仓**工作树**，其提交位置
+    由并行会话决定，对拍门必须钉确定性源（case 09 曾因工作树停在修复前提交
+    而假红 engine_error）。可导入性失败 = 腿缺席。"""
+    import os
+    checkout = Path(os.environ.get("PLAITA_CHECKOUT") or PLAITA)
+    if not checkout.is_dir():
+        print(f"run_plaita: plaita checkout {checkout} missing; leg absent",
+              file=sys.stderr)
+        sys.exit(UNAVAILABLE_EXIT)
+    sys.path.insert(0, str(checkout))
     try:
         import plaita  # noqa: F401
     except Exception as e:  # 依赖缺失（pydantic 等）同样算缺席
         print(
-            f"run_plaita: plaita not importable ({e}); "
-            f"run with the plaita venv python: {PLAITA}/.venv/bin/python",
+            f"run_plaita: plaita not importable from {checkout} ({e}); "
+            f"run with the plaita venv python: {checkout}/.venv/bin/python",
             file=sys.stderr,
         )
         sys.exit(UNAVAILABLE_EXIT)

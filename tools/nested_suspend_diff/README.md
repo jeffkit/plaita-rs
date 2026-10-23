@@ -139,3 +139,14 @@ runner 以 exit 3 报告，diffcheck 记 SKIP。
   （三引擎一致但与 expected 相悖 → 门报 STALE-EXPECTED，先修用例）。
 - 新增 recorded 分歧：先在「分歧清单」写归因，再进 `KNOWN_RED` 钉形状；
   修复后删表项（翻绿进门）。永不为了绿灯改 expected 去迁就分歧。
+
+## plaita 腿的源路径钉定
+
+`run_plaita.py` 以 `PLAITA_CHECKOUT` env（缺省兄弟仓 `../plaita`）**显式钉定**
+plaita 源路径并置于 `sys.path` 置顶——venv 的 editable 安装指向共享主仓工作树，
+其提交位置由并行会话决定（case 09 曾因工作树停在修复前提交而假红
+engine_error）。对拍门必须钉确定性源；本机跑法示例：
+
+    PLAITA_CHECKOUT=$PWD/../plaita-wt-ns3 make ns-m4
+
+（plaita-wt-ns3 = NS-M3/fix 分支 worktree，含嵌套挂起全部修复。）
