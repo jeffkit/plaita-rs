@@ -1,0 +1,68 @@
+{
+  "name": "loop_errorhandler_continue_not_swallowed",
+  "doc": "loop 节点自带 errorHandler continue 时，闸拒绝必须仍以终态上抛（SuspendRejected 拦截臂——continue 不得吞）。",
+  "source": "rs nested_suspend::loop_boundary_rejection_is_not_swallowed_by_error_handler / go TestNestedSuspendLoopRejectionNotSwallowed / plaita TestScopeGate::test_loop_error_handler_continue_does_not_swallow_carrier",
+  "flow": {
+    "flow_id": "loop_swallow",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {
+        "type": "start",
+        "id": "s",
+        "next": "lp"
+      },
+      {
+        "type": "loop",
+        "id": "lp",
+        "collection": "$INPUT.items",
+        "next": "o",
+        "errorHandler": {
+          "strategy": "continue"
+        },
+        "childFlow": {
+          "flow_id": "loop-body",
+          "version": "1",
+          "runtime": "python",
+          "nodes": [
+            {
+              "type": "start",
+              "id": "a",
+              "next": "ev"
+            },
+            {
+              "type": "event",
+              "id": "ev",
+              "event_type": "t",
+              "next": "b"
+            },
+            {
+              "type": "end",
+              "id": "b",
+              "resultType": "success"
+            }
+          ]
+        }
+      },
+      {
+        "type": "end",
+        "id": "o",
+        "output": "done",
+        "resultType": "success"
+      }
+    ]
+  },
+  "flows": {},
+  "input": {
+    "items": [
+      1
+    ]
+  },
+  "resume": [],
+  "suspend_node": null,
+  "expected": {
+    "outcome": "rejected",
+    "reject_reason": "loop_frame",
+    "suspended_nodes": []
+  }
+}

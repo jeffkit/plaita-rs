@@ -4,3 +4,4 @@
 # Go differential reference runner binary (built locally)
 /tools/go-ref-bin
 .DS_Store
+__pycache__/

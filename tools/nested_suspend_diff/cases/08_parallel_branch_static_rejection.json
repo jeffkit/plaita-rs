@@ -1,0 +1,68 @@
+{
+  "name": "parallel_branch_static_rejection",
+  "doc": "parallel 分支静态拒：join 分支图含挂起型节点——派发前静态具名拒（后台分支的动态拒绝是异步的，静态闸覆盖两面）。",
+  "source": "rs nested_suspend::parallel_background_branch_is_statically_rejected / go TestNestedSuspendParallelJoinBranchStaticReject / plaita TestScopeGate::test_parallel_branch_static_gate",
+  "flow": {
+    "flow_id": "par_root",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {
+        "type": "start",
+        "id": "s",
+        "next": "p"
+      },
+      {
+        "type": "parallel",
+        "id": "p",
+        "joinBranches": [
+          "b1"
+        ],
+        "branches": [
+          {
+            "name": "b1",
+            "flow": {
+              "flow_id": "branch1",
+              "version": "1",
+              "runtime": "python",
+              "nodes": [
+                {
+                  "type": "start",
+                  "id": "bs",
+                  "next": "be"
+                },
+                {
+                  "type": "event",
+                  "id": "be",
+                  "event_type": "t",
+                  "next": "bend"
+                },
+                {
+                  "type": "end",
+                  "id": "bend",
+                  "resultType": "success"
+                }
+              ]
+            }
+          }
+        ],
+        "next": "o"
+      },
+      {
+        "type": "end",
+        "id": "o",
+        "output": "done",
+        "resultType": "success"
+      }
+    ]
+  },
+  "flows": {},
+  "input": {},
+  "resume": [],
+  "suspend_node": null,
+  "expected": {
+    "outcome": "rejected",
+    "reject_reason": "parallel_frame",
+    "suspended_nodes": []
+  }
+}

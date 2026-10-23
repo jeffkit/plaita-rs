@@ -1,0 +1,46 @@
+{
+  "name": "middle_frame_resuspension",
+  "doc": "恢复会话中间父帧续跑中再挂起：root→A2→[callb→B(event)、w2(event)]——三层初始栈；恢复 B 后 A2 的 w2 再挂起（新现场+剩余根帧），二次恢复到根完成。",
+  "source": "plaita TestReSuspension::test_suspension_inside_middle_frame_of_resume_session（rs/go ResumeSuspension 同语义面）",
+  "flow": {
+    "flow_id": "R2",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {"type": "start", "id": "s", "next": "calla"},
+      {"type": "child", "id": "calla", "next": "end", "childFlow": {
+        "flow_id": "A2",
+        "version": "1",
+        "runtime": "python",
+        "nodes": [
+          {"type": "start", "id": "astart", "next": "callb"},
+          {"type": "child", "id": "callb", "next": "w2", "childFlow": {
+            "flow_id": "B",
+            "version": "1",
+            "runtime": "python",
+            "nodes": [
+              {"type": "start", "id": "bstart", "next": "wait"},
+              {"type": "event", "id": "wait", "event_type": "deep", "next": "bend"},
+              {"type": "end", "id": "bend", "output": "b-done", "resultType": "success"}
+            ]
+          }},
+          {"type": "event", "id": "w2", "event_type": "mid-evt", "next": "aend"},
+          {"type": "end", "id": "aend", "output": "a2-done", "resultType": "success"}
+        ]
+      }},
+      {"type": "end", "id": "end", "output": "$NODE.calla", "resultType": "success"}
+    ]
+  },
+  "flows": {},
+  "input": {},
+  "resume": [
+    {"type": "event", "data": {"event_type": "deep"}},
+    {"type": "event", "data": {"event_type": "mid-evt"}}
+  ],
+  "suspend_node": "wait",
+  "expected": {
+    "outcome": "completed",
+    "suspended_nodes": ["wait", "w2"],
+    "output": "a2-done"
+  }
+}

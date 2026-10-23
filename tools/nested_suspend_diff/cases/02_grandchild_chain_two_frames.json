@@ -1,0 +1,44 @@
+{
+  "name": "grandchild_chain_two_frames",
+  "doc": "孙代双帧：root→c1→c2→event，两层调用栈；恢复后决策步→两层返回步→根完成，事件恢复态沿 $NODE 链可见。",
+  "source": "rs nested_suspend::grandchild_chain_parks_and_resumes_through_two_frames / go TestNestedSuspendGrandchildChainTwoFrames / plaita TestDeepChains::test_grandchild_double_frame_park_and_resume",
+  "flow": {
+    "flow_id": "root",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {"type": "start", "id": "s", "next": "c1"},
+      {"type": "child", "id": "c1", "next": "o", "childFlow": {
+        "flow_id": "c1.childFlow",
+        "version": "1",
+        "runtime": "python",
+        "nodes": [
+          {"type": "start", "id": "a", "next": "c2"},
+          {"type": "child", "id": "c2", "next": "aend", "childFlow": {
+            "flow_id": "c2.childFlow",
+            "version": "1",
+            "runtime": "python",
+            "nodes": [
+              {"type": "start", "id": "b", "next": "ev"},
+              {"type": "event", "id": "ev", "event_type": "deep", "next": "bend"},
+              {"type": "end", "id": "bend", "output": {"from": "deep", "answer": "$NODE.ev.event_data.k"}, "resultType": "success"}
+            ]
+          }},
+          {"type": "end", "id": "aend", "output": "$NODE.c2", "resultType": "success"}
+        ]
+      }},
+      {"type": "end", "id": "o", "output": "$NODE.c1", "resultType": "success"}
+    ]
+  },
+  "flows": {},
+  "input": {},
+  "resume": [
+    {"type": "event", "data": {"event_type": "deep", "k": "v"}}
+  ],
+  "suspend_node": "ev",
+  "expected": {
+    "outcome": "completed",
+    "suspended_nodes": ["ev"],
+    "output": {"from": "deep", "answer": "v"}
+  }
+}

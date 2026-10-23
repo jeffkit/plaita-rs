@@ -1,0 +1,65 @@
+{
+  "name": "loop_direct_named_rejection",
+  "doc": "loop 直连具名拒：loop 体即 event——迭代帧上的挂起具名拒绝（fail-closed），订阅注册前拒（无孤儿）。",
+  "source": "rs loop_boundary（直连语义）/ go TestNestedSuspendLoopDirectNamedRejected / plaita TestScopeGate::test_loop_direct_suspension_named_rejection",
+  "flow": {
+    "flow_id": "loop_root",
+    "version": "1",
+    "runtime": "python",
+    "nodes": [
+      {
+        "type": "start",
+        "id": "s",
+        "next": "lp"
+      },
+      {
+        "type": "loop",
+        "id": "lp",
+        "collection": "$INPUT.items",
+        "next": "o",
+        "childFlow": {
+          "flow_id": "loop-body",
+          "version": "1",
+          "runtime": "python",
+          "nodes": [
+            {
+              "type": "start",
+              "id": "a",
+              "next": "ev"
+            },
+            {
+              "type": "event",
+              "id": "ev",
+              "event_type": "t",
+              "next": "b"
+            },
+            {
+              "type": "end",
+              "id": "b",
+              "resultType": "success"
+            }
+          ]
+        }
+      },
+      {
+        "type": "end",
+        "id": "o",
+        "output": "done",
+        "resultType": "success"
+      }
+    ]
+  },
+  "flows": {},
+  "input": {
+    "items": [
+      1
+    ]
+  },
+  "resume": [],
+  "suspend_node": null,
+  "expected": {
+    "outcome": "rejected",
+    "reject_reason": "loop_frame",
+    "suspended_nodes": []
+  }
+}
