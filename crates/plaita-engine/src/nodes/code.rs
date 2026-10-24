@@ -396,17 +396,31 @@ fn kill_process_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Envelope `type` values whose `ok=false` failure is deterministic — the
+/// same decision a retry re-runs identical user code on identical input, so
+/// these can never succeed on attempt 2. Mirrors plaita
+/// `runner.DETERMINISTIC_ERROR_TYPES` and plaita-go
+/// `pyDeterministicEnvelopeTypes` (#43); everything else — out-of-set types
+/// (`KeyError`), a missing/bare type, and infra-level failures (no output /
+/// bad JSON) — keeps the retryable default (plaita's unknown-error posture).
+fn py_deterministic_envelope_type(exc_type: &str) -> bool {
+    matches!(
+        exc_type,
+        "ValueError" | "TypeError" | "NameError" | "SyntaxError"
+    )
+}
+
 /// Parses the JSON envelope written by the runner — verbatim port of plaita
 /// `_decode_runner_output`.
 fn decode_python_runner_output(raw: &str, stderr: &str) -> Result<Value, NodeError> {
     if raw.trim().is_empty() {
-        return Err(NodeError::deterministic(format!(
+        return Err(NodeError::transient(format!(
             "Sandbox produced no output. Stderr: {}",
             clip_stderr(stderr)
         )));
     }
     let envelope: Value = serde_json::from_str(raw).map_err(|_| {
-        NodeError::deterministic(format!(
+        NodeError::transient(format!(
             "Sandbox output is not valid JSON: {:.200}. Stderr: {}",
             raw,
             clip_stderr(stderr)
@@ -427,7 +441,11 @@ fn decode_python_runner_output(raw: &str, stderr: &str) -> Result<Value, NodeErr
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .unwrap_or("(unknown)");
-        return Err(NodeError::deterministic(format!("{exc_type}: {exc_msg}")));
+        let message = format!("{exc_type}: {exc_msg}");
+        if py_deterministic_envelope_type(exc_type) {
+            return Err(NodeError::deterministic(message));
+        }
+        return Err(NodeError::transient(message));
     }
     Ok(envelope.get("result").cloned().unwrap_or(Value::Null))
 }
@@ -471,6 +489,41 @@ mod tests {
         assert!(e.message.contains("no output"));
         let e = decode_python_runner_output("not json", "x").unwrap_err();
         assert!(e.message.contains("not valid JSON"));
+    }
+
+    /// 信封重试分类 = py runner.is_retryable_error / go
+    /// pyDeterministicEnvelopeTypes 四类白名单的 rs 镜像（rs#18 / A137-01）：
+    /// 只有四类确定性类型不重试；集外类型（KeyError）、缺型（裸 `Error`）与
+    /// 基础设施级失败（无输出/坏 JSON）维持可重试缺省。
+    #[test]
+    fn envelope_retry_classification_mirrors_go_whitelist() {
+        for t in ["ValueError", "TypeError", "NameError", "SyntaxError"] {
+            let e = decode_python_runner_output(
+                &format!(r#"{{"ok": false, "error": "boom", "type": "{t}"}}"#),
+                "",
+            )
+            .unwrap_err();
+            assert!(!e.is_retryable(), "{t} must be deterministic");
+        }
+        // 集外确定性集：可重试缺省（A137-01 主红格）
+        let e =
+            decode_python_runner_output(r#"{"ok": false, "error": "'k'", "type": "KeyError"}"#, "")
+                .unwrap_err();
+        assert!(e.is_retryable(), "KeyError must keep the retryable default");
+        // 缺型信封（runner 未捕获/无类型名）→ 裸 `Error`：可重试缺省
+        let e = decode_python_runner_output(r#"{"ok": false, "error": "boom"}"#, "").unwrap_err();
+        assert!(
+            e.is_retryable(),
+            "missing type must keep the retryable default"
+        );
+        // 基础设施级失败：sidecar OOM/被杀 → 无输出；输出截断 → 坏 JSON
+        let e = decode_python_runner_output("", "(empty)").unwrap_err();
+        assert!(
+            e.is_retryable(),
+            "no output must keep the retryable default"
+        );
+        let e = decode_python_runner_output("not json", "x").unwrap_err();
+        assert!(e.is_retryable(), "bad JSON must keep the retryable default");
     }
 
     #[test]
