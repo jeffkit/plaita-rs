@@ -352,7 +352,10 @@ mod tests {
             m["supported_node_types"].as_array().unwrap().len() >= 25,
             "supported list mirrors the engine accept-list"
         );
-        assert_eq!(m["features"], json!([]));
+        assert_eq!(
+            m["features"],
+            json!(["checkpoint", "hitl_await", "suspend"])
+        );
         // worker_capacity 随行且 active_tasks 取共享计数
         assert_eq!(meta["worker_capacity"]["schema_version"], 1);
         assert_eq!(meta["worker_capacity"]["active_tasks"], 0);

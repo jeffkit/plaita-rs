@@ -65,9 +65,18 @@ pub fn load(data: &[u8]) -> Result<Flow, String> {
 }
 
 /// Capability contract version — bump whenever the supported/unsupported
-/// node-type lists change, so consumers caching the manifest don't read a
-/// stale list under an unchanged version (plaita-go#80 discipline).
-pub const CONTRACT_VERSION: &str = "2026-10-23.2";
+/// node-type lists or the feature declarations change, so consumers caching
+/// the manifest don't read a stale shape under an unchanged version
+/// (plaita-go#80 discipline).
+pub const CONTRACT_VERSION: &str = "2026-10-28.1";
+
+/// Engine-face features, mirroring plaita-go `pkg/ir` (same three strings):
+/// the B4 r12 suspension architecture moved suspend/resume (incl. nested
+/// NS-M1), the suspension-site checkpoint snapshot (`checkpoint_json` +
+/// snapshot restore) and the hitl_await node INTO the engine — the manifest
+/// must say so, or manifest readers (console #300 gate) fail the RS pool
+/// closed for flows it can actually run.
+pub const FEATURES: &[&str] = &["checkpoint", "hitl_await", "suspend"];
 
 /// 挂起族节点的部署侧依赖（plaita-go#80 phase 3 的 node_dependencies 键）：
 /// 节点引擎面（pending 载荷/决策载体/订阅契约）已实现，但这些设施在本引擎
@@ -104,9 +113,10 @@ pub const NODE_DEPENDENCIES: &[(&str, &str)] = &[
 ];
 
 /// Capability manifest（plaita#300 五键形态，plaita-go#80 parity）：console/
-/// 上层 worker 可据此做 publish/start 能力门。`features` 恒空（checkpoint/
-/// hitl/suspend 的宿主侧设施不在引擎面）；`node_dependencies` 逐节点标注
-/// 挂起族的部署侧依赖（服务层/订阅存储）。
+/// 上层 worker 可据此做 publish/start 能力门。`features` 声明引擎面能力
+/// （suspend/checkpoint/hitl_await——r12 挂起架构入引擎后不再是空集）；
+/// `node_dependencies` 逐节点标注挂起族的部署侧依赖（服务层/订阅存储，
+/// 这些设施在引擎进程外）。
 ///
 /// 键名与 plaita-go `pkg/ir.CapabilityManifest` 的 json tags 逐字对齐
 /// （`ir_contract_version` 而非 `contract_version`）：console 形状闸
@@ -128,7 +138,7 @@ pub fn capability_manifest() -> Value {
         "ir_contract_version": CONTRACT_VERSION,
         "supported_node_types": supported,
         "unsupported_node_types": unsupported,
-        "features": [],
+        "features": FEATURES,
         "node_dependencies": dependencies,
     })
 }

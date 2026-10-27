@@ -160,7 +160,11 @@ fn capability_manifest_json_shape_matches_go() {
     for key in ["supported_node_types", "unsupported_node_types", "features"] {
         assert!(m[key].is_array(), "{key} must be an array");
     }
-    assert_eq!(m["features"].as_array().unwrap().len(), 0);
+    // r12 挂起架构入引擎后 features 非空：与 plaita-go pkg/ir 同一三件。
+    assert_eq!(
+        m["features"],
+        serde_json::json!(["checkpoint", "hitl_await", "suspend"])
+    );
     assert!(m["node_dependencies"].is_object());
     let mut keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();

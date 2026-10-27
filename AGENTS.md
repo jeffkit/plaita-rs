@@ -1,8 +1,9 @@
 # AGENTS.md — plaita-rs
 
-> plaita 的 Rust 版引擎 + IR 解析。参考 [plaita-go](../plaita-go)（同仓群的 Golang 版）移植：
-> **只做「解析 Plaita 的 Flow 并运行」的运行时**，不做 Flow Worker（队列/租约/checkpoint/事件桥
-> 全部不在范围内，属于 worker 运行时层）。负责人：jeffkit | 创建：2026-10-21
+> plaita 的 Rust 版运行时：引擎 + IR 解析 + worker（plaita-worker，WK-M1 起入 main——
+> 队列/租约/checkpoint/事件桥/registry/读穿透在仓内，与 plaita-go `pkg/worker` 按
+> Redis 协议字节兼容互操作）。早期「只做引擎、不做 Flow Worker」的定位自 WK-M1
+> （rs#17，2026-10-23）退役；本头注于 2026-10-28 同步。负责人：jeffkit | 创建：2026-10-21
 
 ## 定位与范围
 
@@ -13,8 +14,9 @@
   while / case〔脱糖 switch〕/ mock / reference〔provider 注入〕；
   **挂起族七类**〔suspend/resume 架构，B4 r12〕：event / hitl_await / delay /
   approval / redis_queue / kafka_queue / http_callback）。
-- **不在范围内（刻意不做）**：`pkg/worker`（Redis Streams 消费、租约 Lua、fence、DLQ、
-  checkpoint 恢复、drain）、console BFF、沙箱 driver、影子对账 harness、agentproc。
+- **不在范围内（刻意不做）**：console BFF、沙箱 driver、影子对账 harness、agentproc、
+  wake 服务层（delay/approval/http_callback/redis_queue 的队列消费者——部署侧设施，
+  纯 Rust 部署暂依赖 Python 服务进程，#19 立单跟续）。
   plaita-go 的这些层按 queue/lease 协议接 worker，本仓接不进来也不需要。
 - 表达式与 IR 的**语义权威**与 plaita-go 相同：plaita `plaita/core/expression_parser.py`
   文法 docstring + `test_expression_golden.py`（golden 用例文件逐字复用 Go 仓导出的
@@ -119,8 +121,11 @@ tools/
   input 缺省继承调用方 $INPUT。
 
 **capability 契约面**（plaita#300 五键形态）：`ir::capability_manifest()` +
-`ir::CONTRACT_VERSION`（2026-10-23.1）；`features`/`node_dependencies` 恒空（无
-checkpoint/hitl/suspend 面）。
+`ir::CONTRACT_VERSION`；`node_dependencies` 逐节点标注挂起族的部署侧依赖
+（B4 r12 起七族全列）；`features` = `["checkpoint","hitl_await","suspend"]`
+（2026-10-28 起——r12 挂起架构入引擎后不再是空集；此前 `恒空` 的口径已退役，
+消费方 console #300 门据此判 RS 池能否跑挂起族 flow；`CONTRACT_VERSION`
+随 features 语义 bump，勿在缓存放行旧形状）。
 
 **防漂移门**：`make node-parity`（CI 同名 job）——`scripts/extract_python_node_types.py`
 从 plaita NodeRegistry（core 内建 + `plaita.nodes` entry points）现场提取权威清单，
