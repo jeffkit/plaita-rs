@@ -24,13 +24,20 @@ use plaita_worker::wake::DelayWake;
 use plaita_worker::{redis_impl::RedisConnection, Config, RedisBackend};
 
 fn main() {
-    let mut cfg = Config::from_env();
     // Distinct default instance identity: the wake registry key is
     // {prefix}:registry:{source}:{instance_id} — never collide with a
-    // worker's worker-<pid> default.
-    if cfg.instance_id.starts_with("worker-") {
-        cfg.instance_id = format!("delay-{}", std::process::id());
+    // worker's worker-<pid> default. Only the DEFAULT is rewritten; an
+    // operator-set PLAITA_INSTANCE_ID wins verbatim (Go parity).
+    if std::env::var("PLAITA_INSTANCE_ID")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        std::env::set_var(
+            "PLAITA_INSTANCE_ID",
+            format!("delay-{}", std::process::id()),
+        );
     }
+    let cfg = Config::from_env();
     eprintln!(
         "[bin] plaita-rs-wake starting (sources=delay, prefix={}, instance={})",
         cfg.key_prefix, cfg.instance_id

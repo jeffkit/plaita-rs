@@ -377,6 +377,13 @@ impl RedisBackend for RedisConnection {
         })
     }
 
+    fn hmget(&self, key: &str, fields: &[&str]) -> BackendResult<Vec<Option<String>>> {
+        self.with_conn(|c| {
+            let v: Vec<Option<String>> = c.hget(key, fields).map_err(map_err)?;
+            Ok(v)
+        })
+    }
+
     fn lrem(&self, key: &str, count: i64, value: &str) -> BackendResult<i64> {
         self.with_conn(|c| {
             let n: i64 = c.lrem(key, count as isize, value).map_err(map_err)?;

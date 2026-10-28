@@ -137,6 +137,9 @@ pub trait RedisBackend: Send + Sync {
     fn hdel(&self, key: &str, field: &str) -> BackendResult<i64>;
     /// HGET one field (None = missing field/key).
     fn hget(&self, key: &str, field: &str) -> BackendResult<Option<String>>;
+    /// HMGET: one round-trip for N fields; per-field None = missing. The
+    /// delay wake reads all due members' attempt records in one call.
+    fn hmget(&self, key: &str, fields: &[&str]) -> BackendResult<Vec<Option<String>>>;
     /// HSET one field (test/config writers; the quota gate only reads).
     fn hset(&self, key: &str, field: &str, value: &str) -> BackendResult<i64>;
 

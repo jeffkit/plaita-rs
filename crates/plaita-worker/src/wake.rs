@@ -19,8 +19,12 @@
 //!
 //! The resume event wire shape and the double-write storage keys
 //! (`{esp}events:{id}` + `{esp}types:{type}` + PUBLISH `{ns}:events:{type}`)
-//! are byte-compatible with the Go worker/Python services, so mixed fleets
-//! share one Redis and any side's wake process serves any side's workers.
+//! are byte-compatible with the Python services (and the Go worker for the
+//! default tenant — Go additionally routes the storage keys through the
+//! tenant namespace, a documented cross-engine divergence; the resume EVENT
+//! channel is tenant-routed identically everywhere, which is the face the
+//! worker bridge consumes). Mixed fleets share one Redis and any side's wake
+//! process serves any side's workers.
 //! Timestamps: the wire `timestamp` and the type-index ZADD score are epoch
 //! SECONDS (Python Event convention; the reconcile scan assumes it — the
 //! data-level `*_trigger_timestamp` fields stay epoch ms, matching Python's
@@ -52,7 +56,10 @@ fn env_f64(name: &str, def: f64) -> f64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| *v > 0.0)
+        // finite + bounded: `inf`/1e300 would panic Duration::from_secs_f64
+        // at construction (and a day-scale poll interval is certainly a
+        // misconfiguration).
+        .filter(|v| v.is_finite() && *v > 0.0 && *v <= 86_400.0)
         .unwrap_or(def)
 }
 
@@ -116,7 +123,7 @@ impl EventSink for RedisEventSink {
 pub struct DelayWake {
     pub cfg: Config,
     pub backend: Arc<dyn RedisBackend>,
-    pub sink: Box<dyn EventSink>,
+    pub sink: Arc<dyn EventSink>,
     pub stop: Arc<AtomicBool>,
 
     queue_key: String,
@@ -151,10 +158,10 @@ impl DelayWake {
             Ok(v) => v,
             Err(_) => format!("{}:delay:queue", cfg.key_prefix),
         };
-        let sink = RedisEventSink {
+        let sink: Arc<dyn EventSink> = Arc::new(RedisEventSink {
             backend: Arc::clone(&backend),
             cfg: cfg.clone(),
-        };
+        });
         Self {
             instance_id: cfg.instance_id.clone(),
             registry_key: format!(
@@ -182,14 +189,14 @@ impl DelayWake {
             queue_key,
             cfg,
             backend,
-            sink: Box::new(sink),
+            sink,
             stop,
             inflight: Mutex::new(HashSet::new()),
         }
     }
 
     /// Overrides the event sink (tests inject failures).
-    pub fn with_sink(mut self, sink: Box<dyn EventSink>) -> Self {
+    pub fn with_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
         self.sink = sink;
         self
     }
@@ -201,11 +208,11 @@ impl DelayWake {
     pub fn run(self: &Arc<Self>) {
         self.registry_beat("starting", 0);
         let heartbeat_stop = Arc::new(AtomicBool::new(false));
-        {
+        let heartbeat_handle = {
             let hb = Arc::clone(self);
             let hb_stop = Arc::clone(&heartbeat_stop);
-            std::thread::spawn(move || hb.registry_loop(hb_stop));
-        }
+            std::thread::spawn(move || hb.registry_loop(hb_stop))
+        };
         eprintln!(
             "[wake-delay] started queue={} scheduled={} instance={}",
             self.queue_key, self.scheduled_key, self.instance_id
@@ -220,7 +227,12 @@ impl DelayWake {
         for j in joins {
             let _ = j.join();
         }
+        // Stop the heartbeat loop and JOIN it before the tombstone: a beat
+        // completing after the shutdown DEL would resurrect the registry key
+        // as "running" with a full TTL — a phantom roll-call row exactly
+        // when the acceptance gate is watching (Go: cancelReg(); <-regDone).
         heartbeat_stop.store(true, Ordering::SeqCst);
+        let _ = heartbeat_handle.join();
         self.registry_shutdown();
         eprintln!("[wake-delay] stopped queue={}", self.queue_key);
     }
@@ -262,6 +274,7 @@ impl DelayWake {
             "service_type": SOURCE_DELAY,
             "host": hostname(),
             "status": "stopped",
+            "start_time": self.start_time,
             "last_heartbeat": now_iso(),
         });
         let _ = self.backend.set(
@@ -328,7 +341,9 @@ impl DelayWake {
             }
         }
         for (raw, _) in &valid {
-            let _ = self.backend.lrem(&self.queue_key, 1, raw);
+            if let Err(e) = self.backend.lrem(&self.queue_key, 1, raw) {
+                eprintln!("[wake-delay] convey LREM failed; ZADD is idempotent, next round re-conveys: {e}");
+            }
         }
     }
 
@@ -350,8 +365,23 @@ impl DelayWake {
                 return;
             }
         };
+        // One HMGET for all due members' attempt records (Go batches the
+        // same way); read failure is fail-open (retry immediately).
+        let due_refs: Vec<&str> = due.iter().map(|s| s.as_str()).collect();
+        let attempts = match self.backend.hmget(&self.attempts_key, &due_refs) {
+            Ok(rows) => due
+                .iter()
+                .cloned()
+                .zip(rows)
+                .filter_map(|(m, raw)| raw.and_then(|r| parse_attempt(&r)).map(|rec| (m, rec)))
+                .collect::<Vec<(String, AttemptRecord)>>(),
+            Err(e) => {
+                eprintln!("[wake-delay] attempt records read failed (fail-open): {e}");
+                Vec::new()
+            }
+        };
         for member in due {
-            if let Some(rec) = self.load_attempt(&member) {
+            if let Some((_, rec)) = attempts.iter().find(|(m, _)| *m == member) {
                 if rec.next > now_ms {
                     continue; // backoff window — next round
                 }
@@ -367,10 +397,18 @@ impl DelayWake {
             }
             let me = Arc::clone(self);
             joins.push(std::thread::spawn(move || {
-                me.process_task(&member);
-                if let Ok(mut m) = me.inflight.lock() {
-                    m.remove(member.as_str());
+                // Drop-guard: process_task panicking must not leak the
+                // in-flight slot (the entry would never be resubmitted).
+                struct Guard(Arc<DelayWake>, String);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        if let Ok(mut m) = self.0.inflight.lock() {
+                            m.remove(self.1.as_str());
+                        }
+                    }
                 }
+                let _guard = Guard(Arc::clone(&me), member.clone());
+                me.process_task(&member);
             }));
         }
     }
@@ -447,10 +485,11 @@ impl DelayWake {
     fn defer(&self, member: &str, cause: String) {
         let attempts = self.load_attempt(member).map(|r| r.attempts).unwrap_or(0) + 1;
         if attempts >= self.max_attempts {
-            // One atomic MULTI/EXEC (Go pipeline / Python pipe.execute
-            // parity): RPUSH the dead letter first, then ZREM + HDel — the
-            // ordering inside the atomic block still prefers a duplicate
-            // over a loss if anything degrades.
+            // One pipelined round-trip (TxOp; Go pipeline parity). The redis
+            // crate's pipe() here is a batched send, NOT MULTI/EXEC — same
+            // as Go's Pipeline().Exec — but the op order (RPUSH dead first,
+            // then ZREM/HDel) still prefers a duplicate over a loss if the
+            // batch degrades mid-flight.
             let tx = self.backend.tx(&[
                 crate::backend::TxOp::Rpush {
                     key: self.dead_key.clone(),
@@ -517,19 +556,24 @@ impl DelayWake {
             "tenant_id": tenant,
         });
         let channel = keys::business_event_channel(&self.cfg, &tenant, SERVICE_ERROR_EVENT);
-        if let Err(e) = self.sink.publish(&channel, &ev.to_string()) {
-            eprintln!("[wake-delay] dead-letter event broadcast failed (dead list remains): {e}");
-        }
+        // Best-effort, off the trigger thread (Go bounds this with a 3s
+        // context; here a detached thread keeps a hung Redis from parking
+        // the trigger and its in-flight slot — the dead list itself remains
+        // the discovery surface either way).
+        let payload = ev.to_string();
+        let sink = Arc::clone(&self.sink);
+        std::thread::spawn(move || {
+            if let Err(e) = sink.publish(&channel, &payload) {
+                eprintln!(
+                    "[wake-delay] dead-letter event broadcast failed (dead list remains): {e}"
+                );
+            }
+        });
     }
 
     fn load_attempt(&self, member: &str) -> Option<AttemptRecord> {
         match self.backend.hget(&self.attempts_key, member) {
-            Ok(Some(raw)) => serde_json::from_str::<Value>(&raw)
-                .ok()
-                .map(|v| AttemptRecord {
-                    attempts: v.get("attempts").and_then(|x| x.as_i64()).unwrap_or(0),
-                    next: v.get("next").and_then(|x| x.as_i64()).unwrap_or(0),
-                }),
+            Ok(Some(raw)) => parse_attempt(&raw),
             Ok(None) => None,
             Err(e) => {
                 // fail-open: a broken counter must never park a task out of
@@ -544,6 +588,15 @@ impl DelayWake {
 struct AttemptRecord {
     attempts: i64,
     next: i64,
+}
+
+fn parse_attempt(raw: &str) -> Option<AttemptRecord> {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .map(|v| AttemptRecord {
+            attempts: v.get("attempts").and_then(|x| x.as_i64()).unwrap_or(0),
+            next: v.get("next").and_then(|x| x.as_i64()).unwrap_or(0),
+        })
 }
 
 /// node_id + event_type required (Python base validation); at least one of
@@ -586,10 +639,23 @@ fn now_ms() -> i64 {
 }
 
 fn hostname() -> String {
-    // gethostname without a new dependency: HOSTNAME is set by most shells;
-    // fall back to a stable placeholder (the registry row is per-instance
-    // anyway — the instance_id disambiguates).
-    std::env::var("HOST").unwrap_or_else(|_| "unknown".to_string())
+    // gethostname without a libc dependency: Linux exposes the kernel
+    // hostname in procfs; HOST/HOSTNAME cover macOS shells. The registry row
+    // is per-instance anyway (instance_id disambiguates).
+    if let Ok(h) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let h = h.trim().to_string();
+        if !h.is_empty() {
+            return h;
+        }
+    }
+    for key in ["HOST", "HOSTNAME"] {
+        if let Ok(h) = std::env::var(key) {
+            if !h.is_empty() {
+                return h;
+            }
+        }
+    }
+    "unknown".to_string()
 }
 
 #[cfg(test)]
@@ -680,7 +746,7 @@ mod tests {
         });
         let stop = Arc::new(AtomicBool::new(false));
         let mut wake = DelayWake::new(cfg, backend_dyn, stop);
-        wake.sink = Box::new(SharedSink(Arc::clone(&sink)));
+        wake.sink = Arc::new(SharedSink(Arc::clone(&sink)));
         Fixture {
             wake: Arc::new(wake),
             backend,
@@ -877,12 +943,12 @@ mod tests {
 
     #[test]
     fn dead_letter_after_max_attempts() {
-        let fx = fixture();
-        let wake = Arc::clone(&fx.wake);
-        // Max attempts shrunk for the test (same crate → field is reachable).
-        let mut_wake = Arc::as_ref(&wake) as *const DelayWake as *mut DelayWake;
-        unsafe { (*mut_wake).max_attempts = 2 };
-        let _ = wake;
+        let mut fx = fixture();
+        // Max attempts shrunk for the test: the fixture owns the only Arc
+        // (no threads spawned yet), so Arc::get_mut hands out a plain &mut.
+        let wake_mut: &mut DelayWake = Arc::get_mut(&mut fx.wake)
+            .expect("fixture owns the only Arc before run() spawns anything");
+        wake_mut.max_attempts = 2;
         fx.sink
             .fail_types
             .lock()
@@ -904,11 +970,23 @@ mod tests {
             .hget(&fx.wake.attempts_key, &raw)
             .unwrap()
             .is_none());
-        // service_error broadcast went through (fail list only covers delay_trigger)
-        let events = fx.sink.events.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(events[0].0.ends_with(":events:service_error"));
-        assert!(events[0].1.contains("delay_trigger_dead_letter"));
+        // service_error broadcast went through (fail list only covers
+        // delay_trigger); it runs on a detached thread — poll for it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let events = fx.sink.events.lock().unwrap();
+            if events.len() == 1 {
+                assert!(events[0].0.ends_with(":events:service_error"));
+                assert!(events[0].1.contains("delay_trigger_dead_letter"));
+                break;
+            }
+            drop(events);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "service_error broadcast did not arrive in time"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

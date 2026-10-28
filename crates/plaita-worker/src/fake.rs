@@ -728,6 +728,18 @@ impl RedisBackend for FakeRedis {
         Ok(list[start as usize..stop as usize].to_vec())
     }
 
+    fn hmget(&self, key: &str, fields: &[&str]) -> Result_<Vec<Option<String>>> {
+        let mut store = self.store.lock().unwrap();
+        Self::gc_key(&mut store, key);
+        let empty: HashMap<String, String> = HashMap::new();
+        let map = store
+            .hashes
+            .get(key)
+            .map(|e| e.value.clone())
+            .unwrap_or(empty);
+        Ok(fields.iter().map(|f| map.get(*f).cloned()).collect())
+    }
+
     fn lrem(&self, key: &str, count: i64, value: &str) -> Result_<i64> {
         let mut store = self.store.lock().unwrap();
         Self::gc_key(&mut store, key);
