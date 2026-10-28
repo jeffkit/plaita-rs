@@ -716,6 +716,38 @@ impl RedisBackend for FakeRedis {
         Ok(list[start as usize..stop as usize].to_vec())
     }
 
+    fn lrem(&self, key: &str, count: i64, value: &str) -> Result_<i64> {
+        let mut store = self.store.lock().unwrap();
+        Self::gc_key(&mut store, key);
+        let Some(entry) = store.lists.get_mut(key) else {
+            return Ok(0);
+        };
+        let mut removed = 0i64;
+        if count >= 0 {
+            // head→tail; count 0 = all occurrences (Redis semantics)
+            let mut i = 0usize;
+            while i < entry.value.len() && (count == 0 || removed < count) {
+                if entry.value[i] == value {
+                    entry.value.remove(i);
+                    removed += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            // tail→head
+            let mut i = entry.value.len();
+            while i > 0 && removed < -count {
+                i -= 1;
+                if entry.value[i] == value {
+                    entry.value.remove(i);
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     fn publish(&self, channel: &str, payload: &str) -> Result_<i64> {
         let subs = self.subs.lock().unwrap();
         let mut delivered = 0i64;

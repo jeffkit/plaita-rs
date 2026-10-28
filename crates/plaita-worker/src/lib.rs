@@ -47,6 +47,7 @@ pub mod registry;
 pub mod retry;
 pub mod state;
 pub mod subscriptions;
+pub mod wake;
 mod watchdog;
 pub mod worker;
 

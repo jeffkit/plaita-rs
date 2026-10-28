@@ -49,6 +49,22 @@ crates/
                        code（python3 sidecar，镜像 plaita _RUNNER_TEMPLATE + env 白名单 + 进程组超时）、
                        http（{data,status,statusText,headers} 契约；非 2xx 不是错误）
   plaita-cli/          bin `plaita-rs`：run / validate / eval
+  plaita-worker/       worker 运行时（rs#17 WK-M1 起）：队列/租约/checkpoint/订阅存储/事件桥/
+                       registry/读穿透（协议权威=plaita-go pkg/worker，Redis 协议字节兼容）
+    src/wake.rs        **wake 值班室**（rs#19，2026-10-28 起）：挂起族配套服务的 Rust 消费者——
+                       语义权威 Python DelayService、参照实现 plaita-go pkg/wake（同 env 键名，
+                       部署配置两侧通用）。**已实现 delay**：list→ZSET 两段式搬运（先 ZADD 后
+                       LREM，member 幂等）/到期轮询/触发确认才 ZREM（at-least-once）/发布失败
+                       留排程 + attempts hash 指数退避（1s·2^(n-1) cap 30s）超限转 `{queue}:dead`
+                       死信（rpush 先于 zrem 宁重不丢）+ service_error 广播；resume 事件 §6.2
+                       双写（{esp}events:{id} + {esp}types:{type} score=epoch 秒 + PUBLISH
+                       {ns}:events:{type}，与 Go/Python 字节兼容混编互备）；registry 键
+                       `{prefix}:registry:delay:{instance}`（TTL 30s/心跳 10s/墓碑 5s）=
+                       集群档受理点名数据源。**wire timestamp=epoch 秒**（Python Event 约定，
+                       reconcile 扫描窗口同单位；data 层 *_trigger_timestamp 保持毫秒）。
+                       bin `plaita-rs-wake`（env 与 worker 同族；首信号优雅停=在途触发落地
+                       或留排程，registry 墓碑）。余量：approval/http_callback/redis_queue
+                       同骨架待续，kafka_queue 需 broker 客户端（#19）
 scripts/
   extract_python_node_types.py   Python↔Rust 节点清单差分门的权威提取器
                                  （自 plaita-go 同名脚本 vendor；从 plaita NodeRegistry 现场取清单，

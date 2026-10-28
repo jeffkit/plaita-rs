@@ -377,6 +377,13 @@ impl RedisBackend for RedisConnection {
         })
     }
 
+    fn lrem(&self, key: &str, count: i64, value: &str) -> BackendResult<i64> {
+        self.with_conn(|c| {
+            let n: i64 = c.lrem(key, count as isize, value).map_err(map_err)?;
+            Ok(n)
+        })
+    }
+
     fn publish(&self, channel: &str, payload: &str) -> BackendResult<i64> {
         self.with_conn(|c| {
             let n: i64 = redis::cmd("PUBLISH")

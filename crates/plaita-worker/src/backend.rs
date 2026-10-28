@@ -152,6 +152,9 @@ pub trait RedisBackend: Send + Sync {
     ) -> BackendResult<Vec<String>>;
     fn rpush(&self, key: &str, value: &str) -> BackendResult<()>;
     fn lrange(&self, key: &str, start: i64, stop: i64) -> BackendResult<Vec<String>>;
+    /// LREM count value (wake convey/ack dequeues with count=1; count 0 =
+    /// all occurrences, negative = tail→head).
+    fn lrem(&self, key: &str, count: i64, value: &str) -> BackendResult<i64>;
 
     // -- pub/sub -----------------------------------------------------------
     fn publish(&self, channel: &str, payload: &str) -> BackendResult<i64>;
