@@ -69,6 +69,18 @@ pub struct GroupInfo {
     pub last_delivered_id: String,
 }
 
+/// The http_callback claim outcome (plaita#188).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimOutcome {
+    /// No registration record under the path (or it vanished mid-claim).
+    NoRecord,
+    /// Another instance holds the processing claim — same unified
+    /// "unregistered" response per Q5.
+    RaceLost,
+    /// Claimed; carries the record JSON.
+    Claimed(String),
+}
+
 /// One transactional pipeline step (subscription register/unregister write
 /// sets). The real backend runs these atomically (TxPipeline); the fake
 /// applies them sequentially — the write set is idempotent, so sequential
@@ -166,6 +178,12 @@ pub trait RedisBackend: Send + Sync {
     /// LREM count value (wake convey/ack dequeues with count=1; count 0 =
     /// all occurrences, negative = tail→head).
     fn lrem(&self, key: &str, count: i64, value: &str) -> BackendResult<i64>;
+    /// BLPOP with a bounded block (seconds; the redis_queue wake listener
+    /// uses 2s like Python). Ok(None) = timed out with nothing available.
+    fn blpop(&self, key: &str, timeout_secs: i64) -> BackendResult<Option<(String, String)>>;
+    /// XREAD (no group) from `last_id`, blocked up to block_ms; `"-"`/`"+"`
+    /// bounds and `"$"` ids pass through verbatim. Empty = nothing new.
+    fn xread(&self, key: &str, last_id: &str, block_ms: i64) -> BackendResult<Vec<StreamEntry>>;
 
     // -- pub/sub -----------------------------------------------------------
     fn publish(&self, channel: &str, payload: &str) -> BackendResult<i64>;
@@ -266,4 +284,14 @@ pub trait RedisBackend: Send + Sync {
 
     /// Transactional pipeline (atomic on the real backend).
     fn tx(&self, ops: &[TxOp]) -> BackendResult<()>;
+    /// http_callback two-phase claim (plaita#188; the verbatim script lives
+    /// in redis_impl, the fake implements it natively): Lua GET record +
+    /// SET claim NX PX — the record is CLAIMED (never deleted at claim
+    /// time), and the record JSON rides back with the win.
+    fn claim_callback(
+        &self,
+        record_key: &str,
+        claim_key: &str,
+        claim_ttl_ms: i64,
+    ) -> BackendResult<ClaimOutcome>;
 }

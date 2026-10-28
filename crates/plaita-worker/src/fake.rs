@@ -740,6 +740,48 @@ impl RedisBackend for FakeRedis {
         Ok(fields.iter().map(|f| map.get(*f).cloned()).collect())
     }
 
+    fn blpop(&self, key: &str, _timeout_secs: i64) -> Result_<Option<(String, String)>> {
+        // The fake is non-blocking: pop immediately or report the timeout
+        // (tests drive timing through the caller, not the block).
+        let mut store = self.store.lock().unwrap();
+        Self::gc_key(&mut store, key);
+        let Some(entry) = store.lists.get_mut(key) else {
+            return Ok(None);
+        };
+        if entry.value.is_empty() {
+            return Ok(None);
+        }
+        let value = entry.value.remove(0);
+        Ok(Some((key.to_string(), value)))
+    }
+
+    fn xread(&self, key: &str, last_id: &str, block_ms: i64) -> Result_<Vec<StreamEntry>> {
+        let _ = block_ms;
+        let mut store = self.store.lock().unwrap();
+        Self::gc_key(&mut store, key);
+        let Some(entry) = store.streams.get(key) else {
+            return Ok(Vec::new());
+        };
+        // StreamData: BTreeMap<id, fields> in insertion-compatible order.
+        let from = if last_id == "$" {
+            // "$" = only-new semantics: the fake cannot know "new", so
+            // callers under test use explicit ids.
+            return Ok(Vec::new());
+        } else {
+            last_id.to_string()
+        };
+        Ok(entry
+            .value
+            .entries
+            .iter()
+            .filter(|e| e.id > from)
+            .map(|e| StreamEntry {
+                id: e.id.clone(),
+                fields: e.fields.clone(),
+            })
+            .collect())
+    }
+
     fn lrem(&self, key: &str, count: i64, value: &str) -> Result_<i64> {
         let mut store = self.store.lock().unwrap();
         Self::gc_key(&mut store, key);
@@ -1268,6 +1310,37 @@ impl RedisBackend for FakeRedis {
             Self::apply_tx_op(&mut store, op);
         }
         Ok(())
+    }
+
+    fn claim_callback(
+        &self,
+        record_key: &str,
+        claim_key: &str,
+        claim_ttl_ms: i64,
+    ) -> Result_<crate::backend::ClaimOutcome> {
+        // GET record + SET claim NX PX as one step: hold the store lock
+        // across both (set_nx would re-lock — std Mutex is not reentrant).
+        let mut store = self.store.lock().unwrap();
+        Self::gc_key(&mut store, record_key);
+        Self::gc_key(&mut store, claim_key);
+        let Some(entry) = store.strings.get(record_key) else {
+            return Ok(crate::backend::ClaimOutcome::NoRecord);
+        };
+        let record = entry.value.clone();
+        if store.strings.contains_key(claim_key) {
+            return Ok(crate::backend::ClaimOutcome::RaceLost);
+        }
+        let expiry = Some(
+            std::time::Instant::now() + Duration::from_secs((claim_ttl_ms / 1000).max(1) as u64),
+        );
+        store.strings.insert(
+            claim_key.to_string(),
+            Entry {
+                value: "1".to_string(),
+                expiry,
+            },
+        );
+        Ok(crate::backend::ClaimOutcome::Claimed(record))
     }
 }
 

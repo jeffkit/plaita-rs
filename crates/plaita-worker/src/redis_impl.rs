@@ -391,6 +391,36 @@ impl RedisBackend for RedisConnection {
         })
     }
 
+    fn blpop(&self, key: &str, timeout_secs: i64) -> BackendResult<Option<(String, String)>> {
+        self.with_conn(|c| {
+            // redis-rs 0.27's blpop takes the timeout in SECONDS (f64).
+            let r: Option<(String, String)> =
+                c.blpop(key, timeout_secs.max(0) as f64).map_err(map_err)?;
+            Ok(r)
+        })
+    }
+
+    fn xread(&self, key: &str, last_id: &str, block_ms: i64) -> BackendResult<Vec<StreamEntry>> {
+        self.with_conn(|c| {
+            let mut cmd = redis::cmd("XREAD");
+            cmd.arg("BLOCK")
+                .arg(block_ms.max(0))
+                .arg("STREAMS")
+                .arg(key)
+                .arg(last_id);
+            let r: Vec<(String, Vec<(String, Vec<(String, String)>)>)> =
+                cmd.query(&mut *c).map_err(map_err)?;
+            Ok(r.into_iter()
+                .flat_map(|(_, entries)| {
+                    entries
+                        .into_iter()
+                        .map(|(id, fields)| StreamEntry { id, fields })
+                        .collect::<Vec<StreamEntry>>()
+                })
+                .collect())
+        })
+    }
+
     fn publish(&self, channel: &str, payload: &str) -> BackendResult<i64> {
         self.with_conn(|c| {
             let n: i64 = redis::cmd("PUBLISH")
@@ -835,6 +865,36 @@ impl RedisBackend for RedisConnection {
             let allowed = as_i64(it.next().unwrap_or(redis::Value::Nil));
             let running = as_i64(it.next().unwrap_or(redis::Value::Nil));
             Ok((allowed, running))
+        })
+    }
+
+    fn claim_callback(
+        &self,
+        record_key: &str,
+        claim_key: &str,
+        claim_ttl_ms: i64,
+    ) -> BackendResult<crate::backend::ClaimOutcome> {
+        self.with_conn(|c| {
+            let script = redis::Script::new(
+                "local v = redis.call('get', KEYS[1]) \
+if not v then return false end \
+if not redis.call('set', KEYS[2], '1', 'NX', 'PX', ARGV[1]) then \
+  return false \
+end \
+return v",
+            );
+            let r: redis::Value = script
+                .key(record_key)
+                .key(claim_key)
+                .arg(claim_ttl_ms)
+                .invoke(&mut *c)
+                .map_err(map_err)?;
+            match r {
+                redis::Value::BulkString(v) => Ok(crate::backend::ClaimOutcome::Claimed(
+                    String::from_utf8_lossy(&v).to_string(),
+                )),
+                _ => Ok(crate::backend::ClaimOutcome::RaceLost),
+            }
         })
     }
 

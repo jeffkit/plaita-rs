@@ -52,7 +52,7 @@ pub const SOURCE_DELAY: &str = "delay";
 const SERVICE_ERROR_EVENT: &str = "service_error";
 const REGISTRY_TOMBSTONE_TTL_SECS: i64 = 5;
 
-fn env_f64(name: &str, def: f64) -> f64 {
+pub(crate) fn env_f64(name: &str, def: f64) -> f64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
@@ -63,7 +63,7 @@ fn env_f64(name: &str, def: f64) -> f64 {
         .unwrap_or(def)
 }
 
-fn env_i64(name: &str, def: i64) -> i64 {
+pub(crate) fn env_i64(name: &str, def: i64) -> i64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.trim().parse::<i64>().ok())
@@ -84,6 +84,12 @@ pub trait EventSink: Send + Sync {
 pub struct RedisEventSink {
     pub backend: Arc<dyn RedisBackend>,
     pub cfg: Config,
+}
+
+impl RedisEventSink {
+    pub fn new(backend: Arc<dyn RedisBackend>, cfg: Config) -> Self {
+        Self { backend, cfg }
+    }
 }
 
 impl EventSink for RedisEventSink {

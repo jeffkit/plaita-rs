@@ -29,6 +29,7 @@
 
 pub mod affinity;
 pub mod agegate;
+pub mod approval;
 pub mod backend;
 pub mod checkpoint;
 pub mod config;
@@ -36,6 +37,7 @@ pub mod error;
 pub mod events;
 pub mod fake;
 pub mod flowsource;
+pub mod httpcallback;
 pub mod keys;
 pub mod lease;
 pub mod metrics;
@@ -43,6 +45,7 @@ pub mod queue;
 pub mod quota;
 pub mod reconcile;
 pub mod redis_impl;
+pub mod redisqueue;
 pub mod registry;
 pub mod retry;
 pub mod state;

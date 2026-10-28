@@ -15,8 +15,8 @@
   **挂起族七类**〔suspend/resume 架构，B4 r12〕：event / hitl_await / delay /
   approval / redis_queue / kafka_queue / http_callback）。
 - **不在范围内（刻意不做）**：console BFF、沙箱 driver、影子对账 harness、agentproc、
-  wake 服务层余量（approval/http_callback/redis_queue/kafka_queue 的队列消费者——
-  **delay 已入 `src/wake.rs`**（rs#19 第一批，2026-10-28）；余下同骨架待续）。
+  wake 服务层余量（仅 kafka_queue——需 broker 客户端选型；delay/approval/
+  redis_queue/http_callback 已入 `src/wake.rs`+三 sibling，rs#19，2026-10-28）。
   plaita-go 的这些层按 queue/lease 协议接 worker，本仓接不进来也不需要。
 - 表达式与 IR 的**语义权威**与 plaita-go 相同：plaita `plaita/core/expression_parser.py`
   文法 docstring + `test_expression_golden.py`（golden 用例文件逐字复用 Go 仓导出的
@@ -58,13 +58,33 @@ crates/
                        留排程 + attempts hash 指数退避（1s·2^(n-1) cap 30s）超限转 `{queue}:dead`
                        死信（rpush 先于 zrem 宁重不丢）+ service_error 广播；resume 事件 §6.2
                        双写（{esp}events:{id} + {esp}types:{type} score=epoch 秒 + PUBLISH
-                       {ns}:events:{type}，与 Go/Python 字节兼容混编互备）；registry 键
-                       `{prefix}:registry:delay:{instance}`（TTL 30s/心跳 10s/墓碑 5s）=
+                       {ns}:events:{type}，与 Python 字节兼容〔Go 仅 default tenant 同键，
+                       其存储键走租户路由——成文跨引擎分歧〕；registry 键
+                       `{prefix}:registry:{source}:{instance}`（TTL 30s/心跳 10s/墓碑 5s）=
                        集群档受理点名数据源。**wire timestamp=epoch 秒**（Python Event 约定，
                        reconcile 扫描窗口同单位；data 层 *_trigger_timestamp 保持毫秒）。
-                       bin `plaita-rs-wake`（env 与 worker 同族；首信号优雅停=在途触发落地
-                       或留排程，registry 墓碑）。余量：approval/http_callback/redis_queue
-                       同骨架待续，kafka_queue 需 broker 客户端（#19）
+  src/approval.rs     approval 消费者（rs#19 第二批）：intake（记录
+                      `{prefix}:approval:pending:{id}` 7d TTL 与 Python 字节同形，重复投递
+                      存在性检查防重建清决策）+ 决策入口 `submit_decision`（SET NX 锁
+                      复用 lease_release compare-and-del + any/all/majority 三策略 + 终局
+                      发 approval_decision 事件并删记录；**发布失败决策不持久化**——
+                      持久化会把重试挡在「已经审批过」上死锁，Python 语义逐字）
+  src/redisqueue.rs   redis_queue 消费者：派发桥 + 用户 Redis 三类监听（list BLPOP 2s /
+                      stream XREAD 自 $ / pubsub），task_complete 键 + 处理后空闲窗收尾；
+                      Python 的订阅存储提前收尾检查未实现（无 correlation 索引，已声明偏差）。
+                      Backend 增 blpop/xread（三处实现）；用户后端测试注入缝 user_backend
+  src/httpcallback.rs http_callback 消费者 + **内置 HTTP ingress**（std TcpListener 最小
+                      HTTP/1.1，PLAITA_HTTP_CALLBACK_ADDR 缺省 :8080〔裸 :port 归一
+                      0.0.0.0〕；Python 侧无路由，纯 Rust 前门由 plaita-rs-wake 提供，
+                      参照 plaita-go 03003f1）：只读记录 → 凭据校验（token/basic/
+                      HMAC-SHA256 签名〔payload={unix秒}.{canonical}，复用 flowsource
+                      规范编码器；base64 内联实现〕先于认领 #113）→ 两阶段认领
+                      （具名 Lua claim_callback：GET+SET NX PX 30s；成功删记录+占位、
+                      失败只释占位 #188）→ resume 事件；Q5 统一失败防 path oracle。
+                      Backend 增 claim_callback（三处实现）
+                       bin `plaita-rs-wake -sources delay,approval,redis_queue,http_callback`
+                       （env 与 worker 同族；首信号优雅停=在途触发落地或留排程，
+                       registry 墓碑）。余量：kafka_queue 需 broker 客户端（#19）
 scripts/
   extract_python_node_types.py   Python↔Rust 节点清单差分门的权威提取器
                                  （自 plaita-go 同名脚本 vendor；从 plaita NodeRegistry 现场取清单，
