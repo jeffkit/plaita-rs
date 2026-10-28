@@ -471,7 +471,7 @@ impl ApprovalWake {
         // terminal state lives on in the execution row.
         record["status"] = json!(final_decision);
         record["completed_time"] = json!(now_ms);
-        let _ = self.backend.del(&[&self.record_key(approval_id).as_str()]);
+        let _ = self.backend.del(&[self.record_key(approval_id).as_str()]);
         eprintln!(
             "[wake-approval] completed: {} final_decision={}",
             approval_id, final_decision

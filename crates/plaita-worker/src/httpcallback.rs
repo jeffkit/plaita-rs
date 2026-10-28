@@ -404,6 +404,7 @@ impl HttpCallbackWake {
     /// The Python handle_callback_request chain. Public for hosts that front
     /// it with their own HTTP layer. Ok(response json value) / Err = unified
     /// failure (Q5).
+    #[allow(clippy::result_unit_err)] // Err(()) 是文档化的统一失败面（Q5）：不携带原因，refusal 细节走 verify_auth 日志通道
     pub fn handle_callback_request(
         &self,
         path: &str,
@@ -601,10 +602,8 @@ fn verify_auth(
     request_data: &Value,
     headers: &[(String, String)],
 ) -> Option<String> {
-    let Some(ac) = auth_config else { return None };
-    let Some(obj) = ac.as_object() else {
-        return None;
-    };
+    let ac = auth_config?;
+    let obj = ac.as_object()?;
     if obj.is_empty() {
         return None; // no auth declared (legacy records)
     }

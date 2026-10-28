@@ -196,6 +196,9 @@ fn from_val_string(v: &redis::Value) -> BackendResult<String> {
     Ok(s)
 }
 
+/// XREAD wire shape：[(stream, [(entry_id, [(field, value)])])]
+type XReadRaw = Vec<(String, Vec<(String, Vec<(String, String)>)>)>;
+
 impl RedisBackend for RedisConnection {
     fn get(&self, key: &str) -> BackendResult<Option<String>> {
         self.with_conn(|c| {
@@ -408,8 +411,7 @@ impl RedisBackend for RedisConnection {
                 .arg("STREAMS")
                 .arg(key)
                 .arg(last_id);
-            let r: Vec<(String, Vec<(String, Vec<(String, String)>)>)> =
-                cmd.query(&mut *c).map_err(map_err)?;
+            let r: XReadRaw = cmd.query(&mut *c).map_err(map_err)?;
             Ok(r.into_iter()
                 .flat_map(|(_, entries)| {
                     entries

@@ -481,11 +481,7 @@ impl RedisQueueWake {
                 }
                 Ok(entries) => {
                     for entry in entries {
-                        let fields = json!(entry
-                            .fields
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<(String, String)>>());
+                        let fields = json!(entry.fields.to_vec());
                         let ev = self.build_message_event(
                             task,
                             json!({

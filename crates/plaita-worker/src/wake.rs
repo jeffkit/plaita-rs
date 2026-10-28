@@ -732,6 +732,7 @@ mod tests {
 
     struct Fixture {
         wake: Arc<DelayWake>,
+        #[allow(dead_code)] // backend 句柄留给后续用例断言；当前用例只吃 wake/sink
         backend: Arc<FakeRedis>,
         sink: Arc<RecordingSink>,
     }

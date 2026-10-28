@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use plaita_worker::wake::{DelayWake, RedisEventSink};
+use plaita_worker::wake::DelayWake;
 use plaita_worker::{redis_impl::RedisConnection, Config, RedisBackend};
 use serde_json::json;
 
