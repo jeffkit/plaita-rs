@@ -340,6 +340,18 @@ impl FakeRedis {
                     e.value.remove(member);
                 }
             }
+            TxOp::Rpush { key, value } => {
+                let e = store
+                    .lists
+                    .entry(key.clone())
+                    .or_insert_with(|| Entry::new(Vec::new()));
+                e.value.push(value.clone());
+            }
+            TxOp::Hdel { key, field } => {
+                if let Some(e) = store.hashes.get_mut(key) {
+                    e.value.remove(field);
+                }
+            }
             TxOp::Del { key } => {
                 store.strings.remove(key);
                 store.sets.remove(key);

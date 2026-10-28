@@ -447,11 +447,25 @@ impl DelayWake {
     fn defer(&self, member: &str, cause: String) {
         let attempts = self.load_attempt(member).map(|r| r.attempts).unwrap_or(0) + 1;
         if attempts >= self.max_attempts {
-            // RPUSH before ZREM (prefer a duplicate over a loss).
-            let push = self.backend.rpush(&self.dead_key, member);
-            let zrem = self.backend.zrem(&self.scheduled_key, member);
-            let hdel = self.backend.hdel(&self.attempts_key, member);
-            if push.is_err() || zrem.is_err() || hdel.is_err() {
+            // One atomic MULTI/EXEC (Go pipeline / Python pipe.execute
+            // parity): RPUSH the dead letter first, then ZREM + HDel — the
+            // ordering inside the atomic block still prefers a duplicate
+            // over a loss if anything degrades.
+            let tx = self.backend.tx(&[
+                crate::backend::TxOp::Rpush {
+                    key: self.dead_key.clone(),
+                    value: member.to_string(),
+                },
+                crate::backend::TxOp::Zrem {
+                    key: self.scheduled_key.clone(),
+                    member: member.to_string(),
+                },
+                crate::backend::TxOp::Hdel {
+                    key: self.attempts_key.clone(),
+                    field: member.to_string(),
+                },
+            ]);
+            if tx.is_err() {
                 eprintln!("[wake-delay] dead-letter move failed; entry stays scheduled (duplicate possible, loss impossible)");
                 return;
             }

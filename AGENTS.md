@@ -15,8 +15,8 @@
   **挂起族七类**〔suspend/resume 架构，B4 r12〕：event / hitl_await / delay /
   approval / redis_queue / kafka_queue / http_callback）。
 - **不在范围内（刻意不做）**：console BFF、沙箱 driver、影子对账 harness、agentproc、
-  wake 服务层（delay/approval/http_callback/redis_queue 的队列消费者——部署侧设施，
-  纯 Rust 部署暂依赖 Python 服务进程，#19 立单跟续）。
+  wake 服务层余量（approval/http_callback/redis_queue/kafka_queue 的队列消费者——
+  **delay 已入 `src/wake.rs`**（rs#19 第一批，2026-10-28）；余下同骨架待续）。
   plaita-go 的这些层按 queue/lease 协议接 worker，本仓接不进来也不需要。
 - 表达式与 IR 的**语义权威**与 plaita-go 相同：plaita `plaita/core/expression_parser.py`
   文法 docstring + `test_expression_golden.py`（golden 用例文件逐字复用 Go 仓导出的

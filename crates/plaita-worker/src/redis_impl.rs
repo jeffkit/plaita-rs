@@ -865,6 +865,12 @@ impl RedisBackend for RedisConnection {
                             .arg(member)
                             .ignore();
                     }
+                    TxOp::Rpush { key, value } => {
+                        pipe.cmd("RPUSH").arg(key).arg(value).ignore();
+                    }
+                    TxOp::Hdel { key, field } => {
+                        pipe.cmd("HDEL").arg(key).arg(field).ignore();
+                    }
                     TxOp::Zrem { key, member } => {
                         pipe.cmd("ZREM").arg(key).arg(member).ignore();
                     }

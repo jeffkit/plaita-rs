@@ -101,6 +101,14 @@ pub enum TxOp {
         key: String,
         member: String,
     },
+    Rpush {
+        key: String,
+        value: String,
+    },
+    Hdel {
+        key: String,
+        field: String,
+    },
     Del {
         key: String,
     },
